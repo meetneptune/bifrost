@@ -1,0 +1,136 @@
+name: Fork Candidate Build
+
+# Builds reproducible "candidate" container images for the meetneptune fork and
+# pushes them to ghcr.io/meetneptune/bifrost, tagged by commit SHA.
+#
+# Why Dockerfile.local: fork candidate images MUST be built from
+# transports/Dockerfile.local. The release Dockerfile (transports/Dockerfile)
+# compiles with GOWORK=off from transports/ alone, so the Go toolchain resolves
+# github.com/maximhq/bifrost/{core,framework,plugins} from the PUBLIC Go module
+# proxy and the image silently ships upstream modules instead of this fork's
+# code. Dockerfile.local copies core/, framework/, plugins/ and transports/
+# from this checkout and builds under an in-image `go work` workspace, which is
+# the only build that contains fork code.
+#
+# Trust boundary: this workflow holds a write credential
+# (packages: write for ghcr.io). It therefore triggers ONLY on a push to the
+# fork's trusted `dev` branch or on manual workflow_dispatch by a maintainer.
+# It MUST NOT trigger on pull_request or any other event that can carry
+# forked/untrusted code. The `if: github.repository == 'meetneptune/bifrost'`
+# job guard is defense in depth so the workflow can never publish from another
+# repository even if this file is copied.
+#
+# Promotion is NOT this workflow's concern: moving a candidate digest to a
+# release tag is a manual, separate step. After each push this workflow prints
+# the pushed image digest to the step summary so a reviewer can copy the
+# immutable digest for that promotion.
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Comma-separated build platforms (buildx platforms value)"
+        required: false
+        default: "linux/amd64"
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fork-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and push candidate image
+    runs-on: ubuntu-latest
+    # Never publish outside the fork (defense in depth).
+    if: github.repository == 'meetneptune/bifrost'
+    timeout-minutes: 60
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      # Audit mode matches the convention used across this repo's publishing
+      # workflows. Endpoints needed to build this image (all pulled inside the
+      # build, but listed for visibility/audit):
+      #   registry-1.docker.io / auth.docker.io / production.cloudflare.docker.com
+      #     -> node, golang and alpine base images from Docker Hub
+      #   dl-cdn.alpinelinux.org -> apk upgrade/apk add in every build stage
+      #   registry.npmjs.org     -> npm ci in the UI build stage
+      #   proxy.golang.org + dl.google.com -> Go toolchain module downloads
+      #   ghcr.io -> candidate image push and imagetools inspect
+      #   github.com / api.github.com / objects.githubusercontent.com
+      #     -> actions/checkout and action runtime downloads
+      - name: Harden Runner
+        uses: step-security/harden-runner@fe104658747b27e96e4f7e80cd0a94068e53901d # v2.16.1
+        with:
+          egress-policy: audit
+          allowed-endpoints: >
+            api.github.com:443
+            auth.docker.io:443
+            dl-cdn.alpinelinux.org:443
+            dl.google.com:443
+            ghcr.io:443
+            github.com:443
+            objects.githubusercontent.com:443
+            production.cloudflare.docker.com:443
+            proxy.golang.org:443
+            registry-1.docker.io:443
+            registry.npmjs.org:443
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: step-security/setup-buildx-action@f931205d68723ad9589fd2a7e2ece238bf9de341 # v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: step-security/docker-login-action@870af644803bf9f204aed474adbad2958fec048b # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image coordinates
+        id: coords
+        run: |
+          GHCR_REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          PLATFORMS="${{ github.event.inputs.platforms || 'linux/amd64' }}"
+          echo "image=${{ env.REGISTRY }}/${GHCR_REPO}" >> "$GITHUB_OUTPUT"
+          echo "platforms=${PLATFORMS}" >> "$GITHUB_OUTPUT"
+          echo "version=$(echo "${{ github.sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          echo "tags=${{ env.REGISTRY }}/${GHCR_REPO}:${{ github.sha }},${{ env.REGISTRY }}/${GHCR_REPO}:dev-candidate" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push candidate image
+        uses: step-security/docker-build-push-action@846549baaf047e867d038826129a64d81df0f704 # v7.1.0
+        with:
+          context: .
+          # Dockerfile.local ONLY — see the header comment. transports/Dockerfile
+          # resolves upstream bifrost modules from the public proxy and would
+          # silently ship upstream code as a fork candidate.
+          file: ./transports/Dockerfile.local
+          push: true
+          platforms: ${{ steps.coords.outputs.platforms }}
+          build-args: |
+            VERSION=${{ steps.coords.outputs.version }}
+          tags: ${{ steps.coords.outputs.tags }}
+
+      - name: Record pushed digest for promotion
+        run: |
+          DIGEST=$(docker buildx imagetools inspect "${{ steps.coords.outputs.image }}:${{ github.sha }}" --format '{{.Manifest.Digest}}')
+          {
+            echo "## Fork candidate image pushed"
+            echo
+            echo "- Image: \`${{ steps.coords.outputs.image }}\`"
+            echo "- Commit tag: \`${{ steps.coords.outputs.image }}:${{ github.sha }}\`"
+            echo "- Mutable tag: \`${{ steps.coords.outputs.image }}:dev-candidate\`"
+            echo "- Platforms: \`${{ steps.coords.outputs.platforms }}\`"
+            echo "- Immutable digest: \`${{ steps.coords.outputs.image }}@${DIGEST}\`"
+            echo
+            echo "Copy the digest above into the manual promotion step. Promotion is not performed by this workflow."
+          } >> "$GITHUB_STEP_SUMMARY"

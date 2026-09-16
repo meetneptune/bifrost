@@ -1,0 +1,90 @@
+name: Fork Promote Image
+
+# Promotes a verified fork candidate image to a release tag by IMMUTABLE DIGEST.
+#
+# This is the only path from a candidate to a named release tag, and it is
+# deliberately manual: a human reviews the candidate (see docs/fork-release-ops.md,
+# "Verify a candidate") and then dispatches this workflow with the candidate's
+# immutable sha256 digest. Tags are mutable and could be re-pointed; the digest is
+# the content address of exactly what was reviewed, so promoting by digest (never
+# by tag) is what makes "the reviewed thing is the released thing" true.
+#
+# This workflow performs NO deployment. It only re-tags an image inside
+# ghcr.io/meetneptune/bifrost. Rolling out the promoted tag is a separate,
+# operator-driven step outside this pipeline.
+
+on:
+  workflow_dispatch:
+    inputs:
+      digest:
+        description: "Immutable image digest to promote (sha256:...). Get it from the candidate build's step summary or `docker buildx imagetools inspect`."
+        required: true
+        type: string
+      release_tag:
+        description: "Release tag to apply (e.g. v1.2.3 or release-2024-06-01). Applied to the given digest."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  promote:
+    name: Promote candidate digest to release tag
+    runs-on: ubuntu-latest
+    # Never run outside the fork (defense in depth).
+    if: github.repository == 'meetneptune/bifrost'
+    timeout-minutes: 15
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fe104658747b27e96e4f7e80cd0a94068e53901d # v2.16.1
+        with:
+          egress-policy: audit
+          allowed-endpoints: >
+            ghcr.io:443
+            api.github.com:443
+            github.com:443
+            objects.githubusercontent.com:443
+
+      - name: Validate inputs
+        run: |
+          if ! [[ "${{ inputs.digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::digest must be a sha256:... immutable digest (64 hex chars), not a tag."
+            exit 1
+          fi
+          if ! [[ "${{ inputs.release_tag }}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::release_tag is not a valid OCI tag."
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: step-security/setup-buildx-action@f931205d68723ad9589fd2a7e2ece238bf9de341 # v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: step-security/docker-login-action@870af644803bf9f204aed474adbad2958fec048b # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote digest to release tag
+        run: |
+          GHCR_REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="${{ env.REGISTRY }}/${GHCR_REPO}"
+          echo "Promoting ${IMAGE}@${{ inputs.digest }} -> ${IMAGE}:${{ inputs.release_tag }}"
+          # imagetools create re-tags server-side by digest; it does not re-pull or
+          # re-build, so the released bytes are byte-identical to the reviewed digest.
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${{ inputs.release_tag }}" \
+            "${IMAGE}@${{ inputs.digest }}"
+          {
+            echo "## Image promoted"
+            echo
+            echo "- Digest: \`${IMAGE}@${{ inputs.digest }}\`"
+            echo "- Release tag: \`${IMAGE}:${{ inputs.release_tag }}\`"
+            echo
+            echo "This workflow does not deploy. Roll out the tag manually."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -79,9 +79,17 @@ func applyContextSpanAttributes(span *schemas.Span, ctx context.Context) {
 	}
 	if userID, ok := ctx.Value(schemas.BifrostContextKeyUserID).(string); ok && userID != "" {
 		span.SetAttribute(schemas.AttrBifrostUserID, userID)
+	} else if reportingID, ok := ctx.Value(schemas.BifrostContextKeyReportingUserID).(string); ok && reportingID != "" {
+		// Reporting-only attribution fallback; the reporting label never feeds
+		// credential, grant, or pricing resolution.
+		span.SetAttribute(schemas.AttrBifrostUserID, reportingID)
 	}
 	if userName, ok := ctx.Value(schemas.BifrostContextKeyUserName).(string); ok && userName != "" {
 		span.SetAttribute(schemas.AttrBifrostUserName, userName)
+	} else if reportingName, ok := ctx.Value(schemas.BifrostContextKeyReportingUserName).(string); ok && reportingName != "" {
+		span.SetAttribute(schemas.AttrBifrostUserName, reportingName)
+	} else if reportingID, ok := ctx.Value(schemas.BifrostContextKeyReportingUserID).(string); ok && reportingID != "" {
+		span.SetAttribute(schemas.AttrBifrostUserName, reportingID)
 	}
 	if userEmail, ok := ctx.Value(schemas.BifrostContextKeyUserEmail).(string); ok && userEmail != "" {
 		span.SetAttribute(schemas.AttrBifrostUserEmail, userEmail)

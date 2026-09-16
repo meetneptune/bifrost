@@ -22493,3 +22493,49 @@ func TestReconcileVirtualMCPsConfig_DedupeNameAndID(t *testing.T) {
 	require.Len(t, vmcps, 1, "duplicate name with a different ID must be deduped")
 	require.Equal(t, "Dup", vmcps[0].Name)
 }
+
+func TestValidateClientConfig_AttributionHeaders(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers []string
+		wantErr bool
+	}{
+		{"unset is valid", nil, false},
+		{"single header", []string{"x-user-id"}, false},
+		{"id plus name-only entry", []string{"x-user-id", "=x-user-name"}, false},
+		{"case and whitespace normalize", []string{" X-User-ID "}, false},
+		{"over cap", []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"}, true},
+		{"duplicate after normalization", []string{"x-user-id", "X-User-Id"}, true},
+		{"invalid header name", []string{"not a header"}, true},
+		{"authorization refused", []string{"authorization"}, true},
+		{"cookie refused", []string{"cookie"}, true},
+		{"x-api-key refused", []string{"x-api-key"}, true},
+		{"token suffix refused", []string{"x-session-token"}, true},
+		{"x-bf-* refused", []string{"x-bf-user-id"}, true},
+		{"hop-by-hop refused", []string{"connection"}, true},
+		{"forwarded refused", []string{"x-forwarded-for"}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateClientConfig(&configstore.ClientConfig{AttributionHeaders: tc.headers})
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "attribution_headers")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestGetAttributionHeadersNormalization(t *testing.T) {
+	c := &Config{ClientConfig: &configstore.ClientConfig{
+		AttributionHeaders: []string{" X-User-ID ", "=X-User-Name", "bad header", "authorization"},
+	}}
+	// Invalid/disallowed entries are skipped (load-time validation rejects them
+	// outright; this accessor is the last line of defense for a config that
+	// bypassed it), valid ones are lowercased with the name-only marker kept.
+	require.Equal(t, []string{"x-user-id", "=x-user-name"}, c.GetAttributionHeaders())
+	require.Nil(t, (&Config{}).GetAttributionHeaders())
+	require.Nil(t, (&Config{ClientConfig: &configstore.ClientConfig{}}).GetAttributionHeaders())
+}

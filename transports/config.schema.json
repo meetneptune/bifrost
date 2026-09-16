@@ -231,6 +231,14 @@
           },
           "description": "Headers that must be present on every request. Requests missing any of these headers are rejected with 400. Case-insensitive matching."
         },
+        "attribution_headers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "description": "Inbound header names whose value labels the request's reporting identity (logs user_id/user_name, bifrost.user.* span attributes, dashboard user filters/rankings). Reporting-only: never grants authority and never affects credential lookup, grants, or pricing. The first listed header carrying a valid value names the user; a name prefixed with '=' (e.g. \"=x-user-name\") is capture-only and supplies only user_name. Values are bounded (max 128 chars, no CR/LF). Configured headers are consumed and stripped before upstream forwarding. Credential-bearing, x-bf-*, and hop-by-hop headers are rejected. When unset (default), behavior is unchanged."
+        },
         "logging_headers": {
           "type": "array",
           "items": {

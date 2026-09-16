@@ -376,6 +376,14 @@ const (
 	BifrostContextKeyUserID                              BifrostContextKey = "bifrost-user-id"                    // string (to store the user ID (set by enterprise auth middleware - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyUserName                            BifrostContextKey = "bifrost-user-name"                  // string (to store the user name (set by enterprise auth middleware - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyUserEmail                           BifrostContextKey = "bifrost-user-email"                 // string (to store the user email (set by enterprise auth middleware - DO NOT SET THIS MANUALLY))
+	// Reporting identity keys hold a request-scoped label captured from a configured
+	// inbound header (client.attribution_headers). They feed log user_id/user_name
+	// columns and bifrost.user.* span attributes ONLY, as a fallback when the
+	// authenticated BifrostContextKeyUserID/UserName are absent. They never grant
+	// authority: nothing reads them for credential lookup, grants, governance, or
+	// pricing, and no code path may copy them into the authenticated user keys.
+	BifrostContextKeyReportingUserID                     BifrostContextKey = "bifrost-reporting-user-id"        // string (set by the HTTP transport from a configured attribution header - reporting only, never authenticated identity)
+	BifrostContextKeyReportingUserName                   BifrostContextKey = "bifrost-reporting-user-name"      // string (set by the HTTP transport from a configured attribution header - reporting only, never authenticated identity)
 	BifrostContextKeyAuthCredential                      BifrostContextKey = "bifrost-auth-credential"            // schemas.Credential (what the request authenticated by, other than a virtual key presented in a header: set by the middleware that verified it, with the kind it names and the id it verified; read once when the request context settles who the request is)
 	BifrostContextKeyMCPInboundBearer                    BifrostContextKey = "bifrost-mcp-inbound-bearer"         // string (the caller's validated identity-provider token, used as the subject of delegated token exchange; set by the upstream auth layer - DO NOT SET THIS MANUALLY. SECURITY: live credential - never log its value)
 	BifrostContextKeyQueryScope                          BifrostContextKey = "bifrost-query-scope"                // configstore.QueryScope (func that mutates a query; set by upstream wrapper - DO NOT SET THIS MANUALLY)

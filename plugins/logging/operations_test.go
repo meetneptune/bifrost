@@ -3671,3 +3671,165 @@ func TestStoreOrEnqueueBeforeInjectStillParks(t *testing.T) {
 		t.Fatalf("Inject must drain the parked entry, writeQueue has %d entries", got)
 	}
 }
+
+// TestPostLLMHookReportingUserAttribution verifies a reporting-only attribution
+// label (captured by the transport from a configured inbound header) lands on
+// the log row's user_id/user_name — non-streaming and streaming — while an
+// authenticated identity always wins and nothing leaves the row userless.
+func TestPostLLMHookReportingUserAttribution(t *testing.T) {
+	newErrCtx := func(requestID string, stream bool) *schemas.BifrostContext {
+		ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+		ctx.SetValue(schemas.BifrostContextKeyRequestID, requestID)
+		return ctx
+	}
+	makeErr := func(requestType schemas.RequestType) *schemas.BifrostError {
+		statusCode := 500
+		return &schemas.BifrostError{
+			IsBifrostError: true,
+			StatusCode:     &statusCode,
+			Error:          &schemas.ErrorField{Message: "provider failed"},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RequestType:            requestType,
+				Provider:               schemas.OpenAI,
+				OriginalModelRequested: "gpt-4o",
+				ResolvedModelUsed:      "gpt-4o",
+			},
+		}
+	}
+	chatReq := &schemas.BifrostRequest{
+		RequestType: schemas.ChatCompletionRequest,
+		ChatRequest: &schemas.BifrostChatRequest{Provider: schemas.OpenAI, Model: "gpt-4o", Params: &schemas.ChatParameters{}},
+	}
+	streamReq := &schemas.BifrostRequest{
+		RequestType: schemas.ChatCompletionStreamRequest,
+		ChatRequest: &schemas.BifrostChatRequest{Provider: schemas.OpenAI, Model: "gpt-4o", Params: &schemas.ChatParameters{}},
+	}
+
+	t.Run("non-streaming reporting label populates user fields", func(t *testing.T) {
+		store := newTestStore(t)
+		plugin, err := Init(context.Background(), &Config{}, testLogger{}, store, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+		ctx := newErrCtx("req-attr-nonstream", false)
+		ctx.SetValue(schemas.BifrostContextKeyReportingUserID, "hdr-user")
+		ctx.SetValue(schemas.BifrostContextKeyReportingUserName, "Header User")
+
+		if _, _, err = plugin.PreLLMHook(ctx, chatReq); err != nil {
+			t.Fatalf("PreLLMHook() error = %v", err)
+		}
+		if _, _, err = plugin.PostLLMHook(ctx, nil, makeErr(schemas.ChatCompletionRequest)); err != nil {
+			t.Fatalf("PostLLMHook() error = %v", err)
+		}
+		if err := plugin.Cleanup(); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+
+		entry, err := store.FindByID(context.Background(), "req-attr-nonstream")
+		if err != nil {
+			t.Fatalf("FindByID() error = %v", err)
+		}
+		if entry.UserID == nil || *entry.UserID != "hdr-user" {
+			t.Fatalf("user_id = %v, want hdr-user", entry.UserID)
+		}
+		if entry.UserName == nil || *entry.UserName != "Header User" {
+			t.Fatalf("user_name = %v, want Header User", entry.UserName)
+		}
+	})
+
+	t.Run("streaming reporting label populates user fields", func(t *testing.T) {
+		store := newTestStore(t)
+		plugin, err := Init(context.Background(), &Config{}, testLogger{}, store, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+		ctx := newErrCtx("req-attr-stream", true)
+		ctx.SetValue(schemas.BifrostContextKeyReportingUserID, "hdr-stream-user")
+
+		if _, _, err = plugin.PreLLMHook(ctx, streamReq); err != nil {
+			t.Fatalf("PreLLMHook() error = %v", err)
+		}
+		if _, _, err = plugin.PostLLMHook(ctx, nil, makeErr(schemas.ChatCompletionStreamRequest)); err != nil {
+			t.Fatalf("PostLLMHook() error = %v", err)
+		}
+		if err := plugin.Cleanup(); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+
+		entry, err := store.FindByID(context.Background(), "req-attr-stream")
+		if err != nil {
+			t.Fatalf("FindByID() error = %v", err)
+		}
+		if entry.UserID == nil || *entry.UserID != "hdr-stream-user" {
+			t.Fatalf("user_id = %v, want hdr-stream-user", entry.UserID)
+		}
+		// Name falls back to the reporting id when no name header was captured.
+		if entry.UserName == nil || *entry.UserName != "hdr-stream-user" {
+			t.Fatalf("user_name = %v, want hdr-stream-user", entry.UserName)
+		}
+	})
+
+	t.Run("authenticated identity wins over reporting label", func(t *testing.T) {
+		store := newTestStore(t)
+		plugin, err := Init(context.Background(), &Config{}, testLogger{}, store, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+		ctx := newErrCtx("req-attr-auth-wins", false)
+		ctx.SetValue(schemas.BifrostContextKeyUserID, "auth-user")
+		ctx.SetValue(schemas.BifrostContextKeyUserName, "Auth User")
+		ctx.SetValue(schemas.BifrostContextKeyReportingUserID, "hdr-user")
+		ctx.SetValue(schemas.BifrostContextKeyReportingUserName, "Header User")
+
+		if _, _, err = plugin.PreLLMHook(ctx, chatReq); err != nil {
+			t.Fatalf("PreLLMHook() error = %v", err)
+		}
+		if _, _, err = plugin.PostLLMHook(ctx, nil, makeErr(schemas.ChatCompletionRequest)); err != nil {
+			t.Fatalf("PostLLMHook() error = %v", err)
+		}
+		if err := plugin.Cleanup(); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+
+		entry, err := store.FindByID(context.Background(), "req-attr-auth-wins")
+		if err != nil {
+			t.Fatalf("FindByID() error = %v", err)
+		}
+		if entry.UserID == nil || *entry.UserID != "auth-user" {
+			t.Fatalf("user_id = %v, want auth-user", entry.UserID)
+		}
+		if entry.UserName == nil || *entry.UserName != "Auth User" {
+			t.Fatalf("user_name = %v, want Auth User", entry.UserName)
+		}
+	})
+
+	t.Run("no identity leaves user fields empty", func(t *testing.T) {
+		store := newTestStore(t)
+		plugin, err := Init(context.Background(), &Config{}, testLogger{}, store, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+		ctx := newErrCtx("req-attr-none", false)
+
+		if _, _, err = plugin.PreLLMHook(ctx, chatReq); err != nil {
+			t.Fatalf("PreLLMHook() error = %v", err)
+		}
+		if _, _, err = plugin.PostLLMHook(ctx, nil, makeErr(schemas.ChatCompletionRequest)); err != nil {
+			t.Fatalf("PostLLMHook() error = %v", err)
+		}
+		if err := plugin.Cleanup(); err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+
+		entry, err := store.FindByID(context.Background(), "req-attr-none")
+		if err != nil {
+			t.Fatalf("FindByID() error = %v", err)
+		}
+		if entry.UserID != nil {
+			t.Fatalf("user_id = %v, want nil", entry.UserID)
+		}
+		if entry.UserName != nil {
+			t.Fatalf("user_name = %v, want nil", entry.UserName)
+		}
+	})
+}

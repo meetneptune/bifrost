@@ -48,7 +48,7 @@ jobs:
 
   test-cli:
     needs: [check-version]
-    if: needs.check-version.outputs.tag_exists == 'false'
+    if: github.repository == 'maximhq/bifrost' && needs.check-version.outputs.tag_exists == 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -75,7 +75,7 @@ jobs:
 
   release-cli:
     needs: [check-version, test-cli]
-    if: needs.check-version.outputs.tag_exists == 'false'
+    if: github.repository == 'maximhq/bifrost' && needs.check-version.outputs.tag_exists == 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -116,7 +116,7 @@ jobs:
 
   push-mintlify-changelog:
     needs: [check-version, release-cli]
-    if: needs.check-version.outputs.tag_exists == 'false' && needs.release-cli.result == 'success'
+    if: github.repository == 'maximhq/bifrost' && needs.check-version.outputs.tag_exists == 'false' && needs.release-cli.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -66,36 +66,34 @@ func TestAttributionIdentityFromHeaders(t *testing.T) {
 	headers := map[string]string{
 		"x-user-id":   "alice",
 		"x-user-name": "Alice A.",
-		"x-email":     "alice@example.com",
-		"x-empty":     "   ",
 		"x-toobig":    strings.Repeat("x", MaxAttributionValueLength+1),
 	}
 
-	// First configured header with a valid value wins.
-	id, ok := AttributionIdentityFromHeaders(headers, []string{"x-user-id", "x-email"})
+	// Id header value names the user; no name header means the id doubles as name.
+	id, ok := AttributionIdentityFromHeaders(headers, "x-user-id", "")
 	if !ok || id.ID != "alice" || id.Name != "alice" {
 		t.Errorf("identity = %+v, %v; want {alice alice}, true", id, ok)
 	}
-	// '='-prefixed entry supplies the name only.
-	id, ok = AttributionIdentityFromHeaders(headers, []string{"x-user-id", "=x-user-name"})
+	// Configured name header supplies the display name.
+	id, ok = AttributionIdentityFromHeaders(headers, "x-user-id", "x-user-name")
 	if !ok || id.ID != "alice" || id.Name != "Alice A." {
 		t.Errorf("identity = %+v, %v; want {alice Alice A.}, true", id, ok)
 	}
-	// Name-only entries never supply the id.
-	if _, ok = AttributionIdentityFromHeaders(headers, []string{"=x-user-name"}); ok {
-		t.Error("name-only config must not produce an identity")
+	// An invalid name value falls back to the id, not to nothing.
+	id, ok = AttributionIdentityFromHeaders(headers, "x-user-id", "x-toobig")
+	if !ok || id.Name != "alice" {
+		t.Errorf("identity = %+v, %v; want name fallback to alice, true", id, ok)
 	}
-	// Invalid values are skipped; a later valid header still wins.
-	id, ok = AttributionIdentityFromHeaders(headers, []string{"x-toobig", "x-empty", "x-email"})
-	if !ok || id.ID != "alice@example.com" {
-		t.Errorf("identity = %+v, %v; want id alice@example.com, true", id, ok)
+	// An invalid id value means no identity at all.
+	if _, ok = AttributionIdentityFromHeaders(headers, "x-toobig", "x-user-name"); ok {
+		t.Error("invalid id value must not produce an identity")
 	}
-	// No configured header present: no identity.
-	if _, ok = AttributionIdentityFromHeaders(headers, []string{"x-absent"}); ok {
+	// No header present: no identity.
+	if _, ok = AttributionIdentityFromHeaders(headers, "x-absent", ""); ok {
 		t.Error("absent headers must not produce an identity")
 	}
 	// Nothing configured: no identity.
-	if _, ok = AttributionIdentityFromHeaders(headers, nil); ok {
+	if _, ok = AttributionIdentityFromHeaders(headers, "", ""); ok {
 		t.Error("empty config must not produce an identity")
 	}
 }

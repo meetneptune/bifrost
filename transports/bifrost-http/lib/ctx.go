@@ -236,9 +236,10 @@ func ResolveSessionIDFromRequest(h *fasthttp.RequestHeader) string {
 //   - x-bf-store-raw-request-response: capture raw request/response for logging only (stripped from client response)
 //
 // 10. Attribution Headers (client.attribution_headers):
-//   - Configured inbound header names whose value labels the request's reporting identity under
+//   - The configured user_id header's value labels the request's reporting identity under
 //     BifrostContextKeyReportingUserID/UserName — a reporting-only fallback for log user_id/user_name
 //     and bifrost.user.* span attributes when no authenticated user was resolved.
+//     The optional user_name header supplies the display name; the id doubles as the name otherwise.
 //   - These headers are consumed here and never forwarded upstream (also not via x-bf-eh- or a
 //     direct-forward allowlist). They never populate the authenticated user identity keys.
 
@@ -276,13 +277,13 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 	mcpHeaderCombinedAllowlist := schemas.WhiteList{}
 	allowPerRequestStorageOverride := false
 	allowPerRequestRawOverride := false
-	var attributionHeaders []string
+	var attributionIDHeader, attributionNameHeader string
 	if store != nil {
 		matcher = store.GetHeaderMatcher()
 		mcpHeaderCombinedAllowlist = store.GetMCPHeaderCombinedAllowlist()
 		allowPerRequestStorageOverride = store.ShouldAllowPerRequestStorageOverride()
 		allowPerRequestRawOverride = store.ShouldAllowPerRequestRawOverride()
-		attributionHeaders = store.GetAttributionHeaders()
+		attributionIDHeader, attributionNameHeader = store.GetAttributionHeaders()
 	}
 	// Reuse a shared request-scoped context when available.
 	var bifrostCtx *schemas.BifrostContext
@@ -380,9 +381,12 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 	}
 
 	// Then process other headers
-	attributionConsumed := make(map[string]bool, len(attributionHeaders))
-	for _, name := range attributionHeaders {
-		attributionConsumed[strings.TrimPrefix(name, "=")] = true
+	attributionConsumed := make(map[string]bool, 2)
+	if attributionIDHeader != "" {
+		attributionConsumed[attributionIDHeader] = true
+	}
+	if attributionNameHeader != "" {
+		attributionConsumed[attributionNameHeader] = true
 	}
 	ctx.Request.Header.All()(func(key, value []byte) bool {
 		keyStr := strings.ToLower(string(key))
@@ -788,7 +792,7 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 	// pricing, and are never copied into the authenticated
 	// BifrostContextKeyUserID/UserName keys — when auth middleware resolved a
 	// user, it takes precedence at read time.
-	if identity, ok := schemas.AttributionIdentityFromHeaders(allHeaders, attributionHeaders); ok {
+	if identity, ok := schemas.AttributionIdentityFromHeaders(allHeaders, attributionIDHeader, attributionNameHeader); ok {
 		bifrostCtx.SetValue(schemas.BifrostContextKeyReportingUserID, identity.ID)
 		if identity.Name != identity.ID {
 			bifrostCtx.SetValue(schemas.BifrostContextKeyReportingUserName, identity.Name)

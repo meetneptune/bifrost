@@ -22495,29 +22495,33 @@ func TestReconcileVirtualMCPsConfig_DedupeNameAndID(t *testing.T) {
 }
 
 func TestValidateClientConfig_AttributionHeaders(t *testing.T) {
+	ah := func(userID, userName string) *configstore.ClientConfig {
+		return &configstore.ClientConfig{AttributionHeaders: &configstore.AttributionHeadersConfig{UserID: userID, UserName: userName}}
+	}
 	tests := []struct {
 		name    string
-		headers []string
+		cc      *configstore.ClientConfig
 		wantErr bool
 	}{
-		{"unset is valid", nil, false},
-		{"single header", []string{"x-user-id"}, false},
-		{"id plus name-only entry", []string{"x-user-id", "=x-user-name"}, false},
-		{"case and whitespace normalize", []string{" X-User-ID "}, false},
-		{"over cap", []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"}, true},
-		{"duplicate after normalization", []string{"x-user-id", "X-User-Id"}, true},
-		{"invalid header name", []string{"not a header"}, true},
-		{"authorization refused", []string{"authorization"}, true},
-		{"cookie refused", []string{"cookie"}, true},
-		{"x-api-key refused", []string{"x-api-key"}, true},
-		{"token suffix refused", []string{"x-session-token"}, true},
-		{"x-bf-* refused", []string{"x-bf-user-id"}, true},
-		{"hop-by-hop refused", []string{"connection"}, true},
-		{"forwarded refused", []string{"x-forwarded-for"}, true},
+		{"unset is valid", &configstore.ClientConfig{}, false},
+		{"id only", ah("x-user-id", ""), false},
+		{"id and name", ah("x-user-id", "x-user-name"), false},
+		{"case and whitespace normalize", ah(" X-User-ID ", ""), false},
+		{"user_id required when set", ah("", "x-user-name"), true},
+		{"whitespace user_id required when set", ah("  ", ""), true},
+		{"invalid id header name", ah("not a header", ""), true},
+		{"invalid name header name", ah("x-user-id", "not a header"), true},
+		{"authorization refused", ah("authorization", ""), true},
+		{"cookie refused", ah("cookie", ""), true},
+		{"x-api-key refused", ah("x-api-key", ""), true},
+		{"token suffix refused", ah("x-user-id", "x-session-token"), true},
+		{"x-bf-* refused", ah("x-bf-user-id", ""), true},
+		{"hop-by-hop refused", ah("connection", ""), true},
+		{"forwarded refused", ah("x-forwarded-for", ""), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateClientConfig(&configstore.ClientConfig{AttributionHeaders: tc.headers})
+			err := validateClientConfig(tc.cc)
 			if tc.wantErr {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), "attribution_headers")
@@ -22529,13 +22533,22 @@ func TestValidateClientConfig_AttributionHeaders(t *testing.T) {
 }
 
 func TestGetAttributionHeadersNormalization(t *testing.T) {
+	// Invalid/disallowed entries come back empty (load-time validation rejects
+	// them outright; this accessor is the last line of defense for a config
+	// that bypassed it), valid ones are lowercased.
 	c := &Config{ClientConfig: &configstore.ClientConfig{
-		AttributionHeaders: []string{" X-User-ID ", "=X-User-Name", "bad header", "authorization"},
+		AttributionHeaders: &configstore.AttributionHeadersConfig{UserID: " X-User-ID ", UserName: "authorization"},
 	}}
-	// Invalid/disallowed entries are skipped (load-time validation rejects them
-	// outright; this accessor is the last line of defense for a config that
-	// bypassed it), valid ones are lowercased with the name-only marker kept.
-	require.Equal(t, []string{"x-user-id", "=x-user-name"}, c.GetAttributionHeaders())
-	require.Nil(t, (&Config{}).GetAttributionHeaders())
-	require.Nil(t, (&Config{ClientConfig: &configstore.ClientConfig{}}).GetAttributionHeaders())
+	id, name := c.GetAttributionHeaders()
+	require.Equal(t, "x-user-id", id)
+	require.Equal(t, "", name)
+
+	for _, c := range []*Config{
+		{},
+		{ClientConfig: &configstore.ClientConfig{}},
+	} {
+		id, name := c.GetAttributionHeaders()
+		require.Equal(t, "", id)
+		require.Equal(t, "", name)
+	}
 }

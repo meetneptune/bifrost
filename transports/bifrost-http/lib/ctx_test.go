@@ -19,9 +19,10 @@ import (
 
 // testHandlerStore is a minimal HandlerStore for ctx tests.
 type testHandlerStore struct {
-	matcher            *HeaderMatcher
-	allowDirectKeys    bool
-	attributionHeaders []string
+	matcher               *HeaderMatcher
+	allowDirectKeys       bool
+	attributionIDHeader   string
+	attributionNameHeader string
 }
 
 func (s testHandlerStore) GetHeaderMatcher() *HeaderMatcher                      { return s.matcher }
@@ -36,9 +37,11 @@ func (s testHandlerStore) GetMCPHeaderCombinedAllowlist() schemas.WhiteList {
 func (s testHandlerStore) ShouldAllowPerRequestStorageOverride() bool { return false }
 func (s testHandlerStore) ShouldAllowPerRequestRawOverride() bool     { return false }
 func (s testHandlerStore) ShouldAllowDirectKeys() bool                { return s.allowDirectKeys }
-func (s testHandlerStore) GetAttributionHeaders() []string          { return s.attributionHeaders }
-func (s testHandlerStore) GetMCPExternalServerURL() string            { return "" }
-func (s testHandlerStore) GetMCPExternalClientURL() string            { return "" }
+func (s testHandlerStore) GetAttributionHeaders() (string, string) {
+	return s.attributionIDHeader, s.attributionNameHeader
+}
+func (s testHandlerStore) GetMCPExternalServerURL() string { return "" }
+func (s testHandlerStore) GetMCPExternalClientURL() string { return "" }
 
 func TestParseSessionIDFromBaggage(t *testing.T) {
 	tests := []struct {
@@ -1091,7 +1094,7 @@ func TestConvertToBifrostContext_AttributionHeaders(t *testing.T) {
 		ctx.Request.Header.Set("x-neptune-user-name", "Alice A.")
 
 		bifrostCtx, cancel := ConvertToBifrostContext(ctx, testHandlerStore{
-			attributionHeaders: []string{"x-neptune-user", "=x-neptune-user-name"},
+			attributionIDHeader: "x-neptune-user", attributionNameHeader: "x-neptune-user-name",
 		})
 		defer cancel()
 
@@ -1137,7 +1140,7 @@ func TestConvertToBifrostContext_AttributionHeaders(t *testing.T) {
 		ctx.Request.Header.Set("x-user", "bob")
 
 		bifrostCtx, cancel := ConvertToBifrostContext(ctx, testHandlerStore{
-			attributionHeaders: []string{"x-user"},
+			attributionIDHeader: "x-user",
 		})
 		defer cancel()
 
@@ -1149,18 +1152,17 @@ func TestConvertToBifrostContext_AttributionHeaders(t *testing.T) {
 		}
 	})
 
-	t.Run("first valid configured header wins and invalid values are ignored", func(t *testing.T) {
+	t.Run("invalid value is ignored", func(t *testing.T) {
 		ctx := &fasthttp.RequestCtx{}
 		ctx.Request.Header.Set("x-first", strings.Repeat("x", schemas.MaxAttributionValueLength+1))
-		ctx.Request.Header.Set("x-second", "carol")
 
 		bifrostCtx, cancel := ConvertToBifrostContext(ctx, testHandlerStore{
-			attributionHeaders: []string{"x-first", "x-second"},
+			attributionIDHeader: "x-first",
 		})
 		defer cancel()
 
-		if got := bifrostCtx.ReportingUserID(); got != "carol" {
-			t.Errorf("ReportingUserID = %q, want carol", got)
+		if got := bifrostCtx.ReportingUserID(); got != "" {
+			t.Errorf("ReportingUserID = %q, want empty for an over-cap value", got)
 		}
 	})
 
@@ -1184,8 +1186,8 @@ func TestConvertToBifrostContext_AttributionHeaders(t *testing.T) {
 		ctx.Request.Header.Set("x-bf-eh-x-neptune-user", "alice")
 
 		bifrostCtx, cancel := ConvertToBifrostContext(ctx, testHandlerStore{
-			matcher:            matcher,
-			attributionHeaders: []string{"x-neptune-user"},
+			matcher:             matcher,
+			attributionIDHeader: "x-neptune-user",
 		})
 		defer cancel()
 
@@ -1202,7 +1204,7 @@ func TestConvertToBifrostContext_AttributionHeaders(t *testing.T) {
 		ctx := &fasthttp.RequestCtx{}
 		ctx.Request.Header.Set("x-neptune-user", "alice")
 
-		store := testHandlerStore{attributionHeaders: []string{"x-neptune-user"}}
+		store := testHandlerStore{attributionIDHeader: "x-neptune-user"}
 		bifrostCtx, cancel := ConvertToBifrostContext(ctx, store)
 		defer cancel()
 

@@ -232,12 +232,19 @@
           "description": "Headers that must be present on every request. Requests missing any of these headers are rejected with 400. Case-insensitive matching."
         },
         "attribution_headers": {
-          "type": "array",
-          "items": {
-            "type": "string"
+          "type": "object",
+          "description": "Reporting-only user attribution from inbound headers: the request's reporting identity for logs user_id/user_name, bifrost.user.* span attributes, and dashboard user filters/rankings. Never grants authority and never affects credential lookup, grants, or pricing. Configured headers are consumed and stripped before upstream forwarding. Values are bounded (max 128 chars, no CR/LF). Credential-bearing, x-bf-*, and hop-by-hop header names are rejected. When unset (default), behavior is unchanged.",
+          "properties": {
+            "user_id": {
+              "type": "string",
+              "description": "Inbound header whose value labels the request's reporting user id (e.g. \"x-neptune-user\"). Required when attribution_headers is set."
+            },
+            "user_name": {
+              "type": "string",
+              "description": "Optional inbound header whose value labels the reporting user name. Defaults to the user id value when unset or invalid."
+            }
           },
-          "maxItems": 8,
-          "description": "Inbound header names whose value labels the request's reporting identity (logs user_id/user_name, bifrost.user.* span attributes, dashboard user filters/rankings). Reporting-only: never grants authority and never affects credential lookup, grants, or pricing. The first listed header carrying a valid value names the user; a name prefixed with '=' (e.g. \"=x-user-name\") is capture-only and supplies only user_name. Values are bounded (max 128 chars, no CR/LF). Configured headers are consumed and stripped before upstream forwarding. Credential-bearing, x-bf-*, and hop-by-hop headers are rejected. When unset (default), behavior is unchanged."
+          "additionalProperties": false
         },
         "logging_headers": {
           "type": "array",

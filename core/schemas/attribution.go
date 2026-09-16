@@ -34,43 +34,28 @@ type AttributionIdentity struct {
 }
 
 // AttributionIdentityFromHeaders returns the reporting identity asserted by
-// the request under the configured attribution header names: the first listed
-// header carrying a valid value wins, and the id header doubles as the name
-// when no separate name header carries one. Entries prefixed with "=" are
-// name-only captures — eligible for the name, never for the id. headers is
-// the lowercased request-header map built by ConvertToBifrostContext.
-func AttributionIdentityFromHeaders(headers map[string]string, configured []string) (AttributionIdentity, bool) {
-	idHeaders := make([]string, 0, len(configured))
-	nameOnly := make([]string, 0, len(configured))
-	for _, name := range configured {
-		if strings.HasPrefix(name, "=") {
-			nameOnly = append(nameOnly, name)
-		} else {
-			idHeaders = append(idHeaders, name)
-		}
-	}
-	id, ok := firstAttributionHeaderValue(headers, idHeaders)
-	if !ok {
+// the request: the value of the configured id header when it is valid, with
+// the configured name header's value as the display name (the id value doubles
+// as the name when no name header is configured or its value is invalid).
+// headers is the lowercased request-header map built by
+// ConvertToBifrostContext; idHeader and nameHeader are normalized header
+// names (nameHeader may be empty).
+func AttributionIdentityFromHeaders(headers map[string]string, idHeader, nameHeader string) (AttributionIdentity, bool) {
+	if idHeader == "" {
 		return AttributionIdentity{}, false
 	}
-	name, nameOK := firstAttributionHeaderValue(headers, nameOnly)
-	if !nameOK {
-		name = id
+	raw, ok := headers[idHeader]
+	if !ok || !AttributionValueOK(raw) {
+		return AttributionIdentity{}, false
 	}
-	return AttributionIdentity{ID: id, Name: name}, true
-}
-
-// firstAttributionHeaderValue returns the first valid, trimmed value found
-// under the given header names, in config order. A name prefixed with "=" is
-// capture-only: its value is eligible but it never names the id source.
-func firstAttributionHeaderValue(headers map[string]string, names []string) (string, bool) {
-	for _, name := range names {
-		name = strings.TrimPrefix(name, "=")
-		if raw, ok := headers[name]; ok && AttributionValueOK(raw) {
-			return strings.TrimSpace(raw), true
+	id := strings.TrimSpace(raw)
+	name := id
+	if nameHeader != "" && nameHeader != idHeader {
+		if rawName, ok := headers[nameHeader]; ok && AttributionValueOK(rawName) {
+			name = strings.TrimSpace(rawName)
 		}
 	}
-	return "", false
+	return AttributionIdentity{ID: id, Name: name}, true
 }
 
 // NormalizeAttributionHeader validates a configured attribution header name:

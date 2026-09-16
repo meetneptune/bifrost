@@ -89,9 +89,9 @@ type HandlerStore interface {
 	// ShouldAllowDirectKeys returns whether callers may bypass the registered key pool via x-bf-direct-key header
 	ShouldAllowDirectKeys() bool
 	// GetAttributionHeaders returns the configured reporting-attribution header
-	// names in priority order (normalized, lowercased). Entries prefixed with
-	// "=" are name-only captures that never supply the reporting user id.
-	GetAttributionHeaders() []string
+	// names (normalized, lowercased): the id header and the optional name header
+	// ("" when unconfigured). Both empty means attribution is disabled.
+	GetAttributionHeaders() (idHeader, nameHeader string)
 	// GetMCPExternalClientURL returns the configured external base URL Bifrost uses as the
 	// redirect_uri when acting as an OAuth client to upstream MCP servers, or empty string
 	// if not configured (falls back to dynamic Host-header-based URL).
@@ -1251,22 +1251,22 @@ func validateClientConfig(cc *configstore.ClientConfig) error {
 	// request-header map and are stripped from upstream forwarding, so they
 	// must normalize cleanly and must not name a credential-bearing,
 	// transport-reserved, or hop-by-hop header.
-	if len(cc.AttributionHeaders) > 8 {
-		return fmt.Errorf("attribution_headers supports at most 8 entries, got %d", len(cc.AttributionHeaders))
-	}
-	seen := make(map[string]bool, len(cc.AttributionHeaders))
-	for _, raw := range cc.AttributionHeaders {
-		name, ok := schemas.NormalizeAttributionHeader(strings.TrimPrefix(raw, "="))
-		if !ok {
-			return fmt.Errorf("attribution_headers entry %q is not a valid HTTP header name", raw)
+	if ah := cc.AttributionHeaders; ah != nil {
+		if strings.TrimSpace(ah.UserID) == "" {
+			return fmt.Errorf("attribution_headers.user_id is required when attribution_headers is set")
 		}
-		if !schemas.IsAttributionHeaderAllowed(name) {
-			return fmt.Errorf("attribution_headers entry %q is not allowed: credential-bearing, x-bf-*, and hop-by-hop headers cannot be attribution sources", raw)
+		for field, raw := range map[string]string{"user_id": ah.UserID, "user_name": ah.UserName} {
+			if strings.TrimSpace(raw) == "" {
+				continue
+			}
+			name, ok := schemas.NormalizeAttributionHeader(raw)
+			if !ok {
+				return fmt.Errorf("attribution_headers.%s %q is not a valid HTTP header name", field, raw)
+			}
+			if !schemas.IsAttributionHeaderAllowed(name) {
+				return fmt.Errorf("attribution_headers.%s %q is not allowed: credential-bearing, x-bf-*, and hop-by-hop headers cannot be attribution sources", field, raw)
+			}
 		}
-		if seen[name] {
-			return fmt.Errorf("attribution_headers entry %q is duplicated", raw)
-		}
-		seen[name] = true
 	}
 	return nil
 }
@@ -5696,26 +5696,22 @@ func (c *Config) ShouldAllowDirectKeys() bool {
 }
 
 // GetAttributionHeaders returns the configured reporting-attribution header
-// names, normalized to lowercase in their configured priority order.
-func (c *Config) GetAttributionHeaders() []string {
-	if c.ClientConfig == nil || len(c.ClientConfig.AttributionHeaders) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(c.ClientConfig.AttributionHeaders))
-	for _, raw := range c.ClientConfig.AttributionHeaders {
-		nameOnly := strings.HasPrefix(raw, "=")
-		name, ok := schemas.NormalizeAttributionHeader(strings.TrimPrefix(raw, "="))
+// names, normalized to lowercase: the id header and the optional name header.
+// Invalid or disallowed entries come back empty (load-time validation rejects
+// them outright; this accessor is the last line of defense for a config that
+// bypassed it).
+func (c *Config) GetAttributionHeaders() (idHeader, nameHeader string) {
+	normalize := func(raw string) string {
+		name, ok := schemas.NormalizeAttributionHeader(raw)
 		if !ok || !schemas.IsAttributionHeaderAllowed(name) {
-			// Invalid entries are rejected by validateClientConfig at load; a
-			// config that bypassed that path simply has them skipped here.
-			continue
+			return ""
 		}
-		if nameOnly {
-			name = "=" + name
-		}
-		out = append(out, name)
+		return name
 	}
-	return out
+	if c.ClientConfig == nil || c.ClientConfig.AttributionHeaders == nil {
+		return "", ""
+	}
+	return normalize(c.ClientConfig.AttributionHeaders.UserID), normalize(c.ClientConfig.AttributionHeaders.UserName)
 }
 
 // GetMCPExternalClientURL returns the configured external base URL Bifrost uses as the

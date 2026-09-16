@@ -76,6 +76,15 @@ func (c *CompatConfig) UnmarshalJSON(data []byte) error {
 
 // ClientConfig represents the core configuration for Bifrost HTTP transport and the Bifrost Client.
 // It includes settings for excess request handling, Prometheus metrics, and initial pool size.
+// AttributionHeadersConfig names the inbound headers carrying a request's
+// reporting-only user identity. The label feeds log user_id/user_name columns
+// and bifrost.user.* span attributes as a fallback when no authenticated user
+// was resolved; it is never an authenticated identity and grants no authority.
+type AttributionHeadersConfig struct {
+	UserID   string `json:"user_id"`             // Inbound header whose value labels the reporting user id
+	UserName string `json:"user_name,omitempty"` // Optional header for the reporting user name; defaults to the user id value
+}
+
 type ClientConfig struct {
 	DropExcessRequests                    bool                                  `json:"drop_excess_requests"`                       // Drop excess requests if the provider queue is full
 	InitialPoolSize                       int                                   `json:"initial_pool_size"`                          // The initial pool size for the bifrost client
@@ -106,7 +115,7 @@ type ClientConfig struct {
 	HeaderFilterConfig                    *tables.GlobalHeaderFilterConfig      `json:"header_filter_config,omitempty"`              // Global header filtering configuration for x-bf-eh-* headers
 	AsyncJobResultTTL                     int                                   `json:"async_job_result_ttl"`                        // Default TTL for async job results in seconds (default: 3600 = 1 hour)
 	RequiredHeaders                       []string                              `json:"required_headers,omitempty"`                  // Headers that must be present on every request (case-insensitive)
-	AttributionHeaders                    []string                              `json:"attribution_headers,omitempty"`               // Inbound header names whose value labels the request's reporting identity (logs user_id/user_name, span bifrost.user.*). Reporting-only: never grants authority or affects credential/pricing resolution. The first listed header carrying a valid value names the user; a name prefixed with '=' (e.g. "=x-user-name") is capture-only and never supplies the id. Consumed before upstream forwarding.
+	AttributionHeaders                    *AttributionHeadersConfig             `json:"attribution_headers,omitempty"`               // Inbound headers carrying the request's reporting-only user identity (logs user_id/user_name, span bifrost.user.*). Reporting-only: never grants authority or affects credential/pricing resolution. Consumed before upstream forwarding.
 	LoggingHeaders                        []string                              `json:"logging_headers,omitempty"`                   // Headers to capture in log metadata
 	WhitelistedRoutes                     []string                              `json:"whitelisted_routes,omitempty"`                // Routes that bypass auth middleware
 	HideDeletedVirtualKeysInFilters       bool                                  `json:"hide_deleted_virtual_keys_in_filters"`        // Hide deleted virtual keys from logs/MCP filter data

@@ -1,0 +1,241 @@
+name: Fork Upstream Sync
+
+# Tracks stable upstream (maximhq/bifrost) `transports/v*` releases and opens
+# ONE reviewable PR per tag into `dev` so the fork can absorb upstream changes
+# deliberately. Never auto-merges, never pushes to `dev`, never auto-closes.
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Weekly on Monday at 9am UTC
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Pin a specific upstream release tag (e.g. transports/v2.2.0) instead of the latest stable transports tag"
+        required: false
+        type: string
+
+permissions:
+  contents: write # push the workflow-owned upstream-sync/* branch
+  pull-requests: write # open/update the sync PR
+
+# One sync run at a time; a queued run waits rather than racing a branch update.
+concurrency:
+  group: fork-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync upstream stable release into dev
+    # Only ever run in the fork, never in upstream itself.
+    if: github.repository == 'meetneptune/bifrost'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fe104658747b27e96e4f7e80cd0a94068e53901d # v2.16.1
+        with:
+          # Audit mode: observe only, no blocking. This job fetches Go modules
+          # from the public internet, so an allowlist is not practical yet.
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: "1.27.0"
+
+      - name: Fetch upstream tags
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/maximhq/bifrost.git
+          git fetch upstream --tags
+          git fetch origin dev
+
+      - name: Determine target tag
+        id: target
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG}" ]; then
+            # Manual dispatch: validate the pinned tag exists upstream.
+            if ! git rev-parse -q --verify "refs/tags/${INPUT_TAG}" >/dev/null; then
+              echo "::error::Pinned tag '${INPUT_TAG}' does not exist. Fetched upstream tags include:" >&2
+              git tag -l 'transports/v*' | sort -V | tail -10 >&2
+              exit 1
+            fi
+            TAG="${INPUT_TAG}"
+          else
+            # Weekly schedule: production baseline is the transports/v* line.
+            # Pick the highest STABLE semver tag: exclude any pre-release
+            # suffix (-rc, -beta, -alpha, ...) — only transports/vX.Y.Z counts.
+            TAG="$(git tag -l 'transports/v*' \
+              | grep -E '^transports/v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -n 1)"
+          fi
+          if [ -z "${TAG}" ]; then
+            echo "::error::No stable transports/v* tag found upstream" >&2
+            exit 1
+          fi
+          SYNC_BRANCH="upstream-sync/${TAG}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "sync_branch=${SYNC_BRANCH}" >> "${GITHUB_OUTPUT}"
+          echo "Target tag: ${TAG} (branch: ${SYNC_BRANCH})"
+
+      - name: Skip if already merged into dev
+        # The sync branch name embeds the tag, so an existing PR for it is the
+        # dedup signal handled below. This step only short-circuits when the
+        # tag is already an ancestor of dev — nothing left to absorb.
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor "${{ steps.target.outputs.tag }}" origin/dev; then
+            echo "${{ steps.target.outputs.tag }} is already contained in origin/dev — nothing to sync."
+            echo "skip=true" >> "${GITHUB_ENV}"
+          else
+            echo "skip=false" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Create sync branch and merge upstream tag
+        if: env.skip == 'false'
+        id: merge
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.target.outputs.tag }}"
+          SYNC_BRANCH="${{ steps.target.outputs.sync_branch }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Rebuild the sync branch fresh from latest origin/dev every run.
+          # The branch is workflow-owned; the runner starts clean each time,
+          # so force-with-lease on push (below) never overwrites human work.
+          git checkout -B "${SYNC_BRANCH}" origin/dev
+
+          # Attempt the merge WITHOUT committing so conflicts can be detected.
+          if git merge --no-commit --no-ff "${TAG}"; then
+            git commit -m "chore: merge upstream ${TAG} into dev"
+            echo "conflicts=false" >> "${GITHUB_OUTPUT}"
+            echo "Merge of ${TAG} completed cleanly."
+          else
+            # Conflicts: do NOT force-resolve. Abort, push the plain base
+            # branch, and let the PR describe the conflict + manual step.
+            git merge --abort || true
+            git reset --hard origin/dev
+            echo "conflicts=true" >> "${GITHUB_OUTPUT}"
+            echo "Merge of ${TAG} has conflicts — pushing base branch; PR will document manual resolution."
+          fi
+
+      - name: Push sync branch
+        if: env.skip == 'false'
+        run: |
+          set -euo pipefail
+          # Never force-push without lease, and NEVER touch dev — only the
+          # workflow-owned upstream-sync/* branch is pushed here.
+          git push --force-with-lease origin "${{ steps.target.outputs.sync_branch }}"
+
+      - name: Compatibility build check
+        if: env.skip == 'false' && steps.merge.outputs.conflicts == 'false'
+        id: build
+        run: |
+          set -uo pipefail
+          {
+            source .github/workflows/scripts/setup-go-workspace.sh
+            go build ./core/... ./framework/...
+            # transports main embeds the UI; stub it so the build compiles.
+            mkdir -p transports/bifrost-http/ui
+            [ -f transports/bifrost-http/ui/index.html ] || echo "stub" > transports/bifrost-http/ui/index.html
+            go build ./transports/...
+          } > /tmp/build.log 2>&1
+          BUILD_RC=$?
+          if [ ${BUILD_RC} -eq 0 ]; then
+            echo "result=pass" >> "${GITHUB_OUTPUT}"
+            echo "✅ Compatibility build passed (core, framework, transports)."
+          else
+            echo "result=fail" >> "${GITHUB_OUTPUT}"
+            echo "❌ Compatibility build FAILED (exit ${BUILD_RC}). Log tail:"
+            tail -40 /tmp/build.log || true
+          fi
+          # Never fail the workflow: the result belongs in the PR body.
+          exit 0
+
+      - name: Open or update sync PR
+        if: env.skip == 'false'
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+          SYNC_BRANCH: ${{ steps.target.outputs.sync_branch }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          BUILD_RESULT: ${{ steps.build.outputs.result }}
+        run: |
+          set -euo pipefail
+          TITLE="chore: sync upstream ${TAG} into dev"
+
+          {
+            echo "## Upstream sync: \`${TAG}\`"
+            echo ""
+            echo "- **Upstream tag:** [\`${TAG}\`](https://github.com/maximhq/bifrost/releases/tag/${TAG})"
+            if [ -n "${{ inputs.tag }}" ]; then
+              echo "- **Selection:** manually pinned via \`workflow_dispatch\` input"
+            else
+              echo "- **Selection:** latest **stable** \`transports/v*\` release (pre-release tags like \`-rc\`/\`-beta\`/\`-alpha\` are excluded)"
+            fi
+            echo ""
+            echo "### Compatibility build"
+            if [ "${CONFLICTS}" = "true" ]; then
+              echo ""
+              echo "⚠️ **Skipped** — the merge has conflicts (see below). Run the build after resolving them."
+            elif [ "${BUILD_RESULT}" = "pass" ]; then
+              echo ""
+              echo "✅ **Pass** — \`go build ./core/... ./framework/... ./transports/...\` (with UI stub) succeeded on the merged branch."
+            elif [ "${BUILD_RESULT}" = "fail" ]; then
+              echo ""
+              echo "❌ **FAIL** — the merged branch does not compile. Recent build output:"
+              echo ""
+              echo '```'
+              tail -40 /tmp/build.log 2>/dev/null || echo "(build log unavailable)"
+              echo '```'
+            else
+              echo ""
+              echo "ℹ️ Not run."
+            fi
+            echo ""
+            echo "### Merge status"
+            if [ "${CONFLICTS}" = "true" ]; then
+              echo ""
+              echo "⚠️ **Manual conflict resolution required.** This branch is \`dev\` WITHOUT the upstream merge (the merge was aborted, not force-resolved). To complete the sync:"
+              echo ""
+              echo '```bash'
+              echo "git fetch origin && git checkout ${SYNC_BRANCH}"
+              echo "git remote add upstream https://github.com/maximhq/bifrost.git 2>/dev/null || true"
+              echo "git fetch upstream --tags"
+              echo "git merge ${TAG}   # resolve conflicts, then commit and push"
+              echo '```'
+              echo ""
+              echo "This PR will show the conflicts against \`dev\` once the merge is pushed."
+            else
+              echo ""
+              echo "✅ \`${TAG}\` merged cleanly into this branch (merge commit, no rebase)."
+            fi
+            echo ""
+            echo "### Safety"
+            echo ""
+            echo "- 🤖 Opened by the [fork-upstream-sync](https://github.com/meetneptune/bifrost/actions/workflows/fork-upstream-sync.yml) workflow."
+            echo "- 🚫 **No auto-merge, no auto-deploy, no auto-close** — a human must review and merge this PR."
+            echo "- 🚫 This workflow never pushes to \`dev\` directly; only the \`${SYNC_BRANCH}\` branch is workflow-owned."
+            echo ""
+            echo "_Review the upstream changes, run CI, then merge manually when ready._"
+          } > /tmp/pr-body.md
+
+          EXISTING_PR="$(gh pr list --base dev --head "${SYNC_BRANCH}" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "${EXISTING_PR}" ]; then
+            echo "PR #${EXISTING_PR} already exists for ${SYNC_BRANCH} — updating title/body and commenting."
+            gh pr edit "${EXISTING_PR}" --title "${TITLE}" --body-file /tmp/pr-body.md
+            gh pr comment "${EXISTING_PR}" --body "🔄 Sync branch rebuilt from latest \`origin/dev\` against upstream \`${TAG}\` ($(date -u '+%Y-%m-%d %H:%M UTC')). Conflicts: \`${CONFLICTS}\`. Build: \`${BUILD_RESULT:-skipped}\`."
+          else
+            gh pr create --base dev --head "${SYNC_BRANCH}" --title "${TITLE}" --body-file /tmp/pr-body.md
+          fi

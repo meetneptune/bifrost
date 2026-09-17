@@ -22493,3 +22493,62 @@ func TestReconcileVirtualMCPsConfig_DedupeNameAndID(t *testing.T) {
 	require.Len(t, vmcps, 1, "duplicate name with a different ID must be deduped")
 	require.Equal(t, "Dup", vmcps[0].Name)
 }
+
+func TestValidateClientConfig_AttributionHeaders(t *testing.T) {
+	ah := func(userID, userName string) *configstore.ClientConfig {
+		return &configstore.ClientConfig{AttributionHeaders: &configstore.AttributionHeadersConfig{UserID: userID, UserName: userName}}
+	}
+	tests := []struct {
+		name    string
+		cc      *configstore.ClientConfig
+		wantErr bool
+	}{
+		{"unset is valid", &configstore.ClientConfig{}, false},
+		{"id only", ah("x-user-id", ""), false},
+		{"id and name", ah("x-user-id", "x-user-name"), false},
+		{"case and whitespace normalize", ah(" X-User-ID ", ""), false},
+		{"user_id required when set", ah("", "x-user-name"), true},
+		{"whitespace user_id required when set", ah("  ", ""), true},
+		{"invalid id header name", ah("not a header", ""), true},
+		{"invalid name header name", ah("x-user-id", "not a header"), true},
+		{"authorization refused", ah("authorization", ""), true},
+		{"cookie refused", ah("cookie", ""), true},
+		{"x-api-key refused", ah("x-api-key", ""), true},
+		{"token suffix refused", ah("x-user-id", "x-session-token"), true},
+		{"x-bf-* refused", ah("x-bf-user-id", ""), true},
+		{"hop-by-hop refused", ah("connection", ""), true},
+		{"forwarded refused", ah("x-forwarded-for", ""), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateClientConfig(tc.cc)
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "attribution_headers")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestGetAttributionHeadersNormalization(t *testing.T) {
+	// Invalid/disallowed entries come back empty (load-time validation rejects
+	// them outright; this accessor is the last line of defense for a config
+	// that bypassed it), valid ones are lowercased.
+	c := &Config{ClientConfig: &configstore.ClientConfig{
+		AttributionHeaders: &configstore.AttributionHeadersConfig{UserID: " X-User-ID ", UserName: "authorization"},
+	}}
+	id, name := c.GetAttributionHeaders()
+	require.Equal(t, "x-user-id", id)
+	require.Equal(t, "", name)
+
+	for _, c := range []*Config{
+		{},
+		{ClientConfig: &configstore.ClientConfig{}},
+	} {
+		id, name := c.GetAttributionHeaders()
+		require.Equal(t, "", id)
+		require.Equal(t, "", name)
+	}
+}

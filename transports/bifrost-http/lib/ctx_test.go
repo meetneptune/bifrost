@@ -19,8 +19,10 @@ import (
 
 // testHandlerStore is a minimal HandlerStore for ctx tests.
 type testHandlerStore struct {
-	matcher         *HeaderMatcher
-	allowDirectKeys bool
+	matcher               *HeaderMatcher
+	allowDirectKeys       bool
+	attributionIDHeader   string
+	attributionNameHeader string
 }
 
 func (s testHandlerStore) GetHeaderMatcher() *HeaderMatcher                      { return s.matcher }
@@ -35,8 +37,11 @@ func (s testHandlerStore) GetMCPHeaderCombinedAllowlist() schemas.WhiteList {
 func (s testHandlerStore) ShouldAllowPerRequestStorageOverride() bool { return false }
 func (s testHandlerStore) ShouldAllowPerRequestRawOverride() bool     { return false }
 func (s testHandlerStore) ShouldAllowDirectKeys() bool                { return s.allowDirectKeys }
-func (s testHandlerStore) GetMCPExternalServerURL() string            { return "" }
-func (s testHandlerStore) GetMCPExternalClientURL() string            { return "" }
+func (s testHandlerStore) GetAttributionHeaders() (string, string) {
+	return s.attributionIDHeader, s.attributionNameHeader
+}
+func (s testHandlerStore) GetMCPExternalServerURL() string { return "" }
+func (s testHandlerStore) GetMCPExternalClientURL() string { return "" }
 
 func TestParseSessionIDFromBaggage(t *testing.T) {
 	tests := []struct {
@@ -1077,4 +1082,135 @@ func TestConvertToBifrostContextCancelsSeededContextWhenClientDisconnects(t *tes
 	case <-time.After(5 * time.Second):
 		t.Fatal("handler never reported an outcome")
 	}
+}
+
+// TestConvertToBifrostContext_AttributionHeaders verifies configured attribution
+// headers populate the reporting-only identity keys, never the authenticated
+// user keys, and are consumed before any upstream-forwarding path.
+func TestConvertToBifrostContext_AttributionHeaders(t *testing.T) {
+	t.Run("captures reporting identity only", func(t *testing.T) {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.Header.Set("x-neptune-user", "alice")
+		ctx.Request.Header.Set("x-neptune-user-name", "Alice A.")
+
+		bifrostCtx, cancel := ConvertToBifrostContext(ctx, testHandlerStore{
+			attributionIDHeader: "x-neptune-user", attributionNameHeader: "x-neptune-user-name",
+		})
+		defer cancel()
+
+		if got := bifrostCtx.ReportingUserID(); got != "alice" {
+			t.Errorf("ReportingUserID = %q, want alice", got)
+		}
+		if got := bifrostCtx.ReportingUserName(); got != "Alice A." {
+			t.Errorf("ReportingUserName = %q, want Alice A.", got)
+		}
+		// Authenticated identity must stay empty: a reporting label grants nothing.
+		if got, _ := bifrostCtx.Value(schemas.BifrostContextKeyUserID).(string); got != "" {
+			t.Errorf("BifrostContextKeyUserID = %q, want empty", got)
+		}
+		if got, _ := bifrostCtx.Value(schemas.BifrostContextKeyUserName).(string); got != "" {
+			t.Errorf("BifrostContextKeyUserName = %q, want empty", got)
+		}
+		if got, _ := bifrostCtx.Value(schemas.BifrostContextKeyUserEmail).(string); got != "" {
+			t.Errorf("BifrostContextKeyUserEmail = %q, want empty", got)
+		}
+		if mode := bifrostCtx.MCPAuthMode(); mode != schemas.MCPAuthModeNone {
+			t.Errorf("MCPAuthMode = %v, want MCPAuthModeNone", mode)
+		}
+		// The settled grant identity must carry neither user nor credential:
+		// attribution headers are reporting-only and grant no authority.
+		grant := bifrostCtx.Grant()
+		if grant == nil {
+			t.Fatal("expected a settled grant on the request context")
+		}
+		identity := grant.Identity()
+		if identity == nil {
+			t.Fatal("expected a settled grant identity")
+		}
+		if user := identity.User(); user != nil {
+			t.Errorf("grant identity user = %#v, want nil", user)
+		}
+		if identity.Presented() {
+			t.Error("grant identity must not present a credential from an attribution header")
+		}
+	})
+
+	t.Run("id doubles as name without a name-only entry", func(t *testing.T) {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.Header.Set("x-user", "bob")
+
+		bifrostCtx, cancel := ConvertToBifrostContext(ctx, testHandlerStore{
+			attributionIDHeader: "x-user",
+		})
+		defer cancel()
+
+		if got := bifrostCtx.ReportingUserID(); got != "bob" {
+			t.Errorf("ReportingUserID = %q, want bob", got)
+		}
+		if got := bifrostCtx.ReportingUserName(); got != "bob" {
+			t.Errorf("ReportingUserName = %q, want bob", got)
+		}
+	})
+
+	t.Run("invalid value is ignored", func(t *testing.T) {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.Header.Set("x-first", strings.Repeat("x", schemas.MaxAttributionValueLength+1))
+
+		bifrostCtx, cancel := ConvertToBifrostContext(ctx, testHandlerStore{
+			attributionIDHeader: "x-first",
+		})
+		defer cancel()
+
+		if got := bifrostCtx.ReportingUserID(); got != "" {
+			t.Errorf("ReportingUserID = %q, want empty for an over-cap value", got)
+		}
+	})
+
+	t.Run("no config leaves behavior unchanged", func(t *testing.T) {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.Header.Set("x-neptune-user", "alice")
+
+		bifrostCtx, cancel := ConvertToBifrostContext(ctx, testHandlerStore{})
+		defer cancel()
+
+		if got := bifrostCtx.ReportingUserID(); got != "" {
+			t.Errorf("ReportingUserID = %q, want empty with no attribution config", got)
+		}
+	})
+
+	t.Run("consumed before x-bf-eh- and direct-forward allowlist", func(t *testing.T) {
+		matcher := NewHeaderMatcher(&configstoreTables.GlobalHeaderFilterConfig{Allowlist: []string{"*"}})
+
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.Header.Set("x-neptune-user", "alice")
+		ctx.Request.Header.Set("x-bf-eh-x-neptune-user", "alice")
+
+		bifrostCtx, cancel := ConvertToBifrostContext(ctx, testHandlerStore{
+			matcher:             matcher,
+			attributionIDHeader: "x-neptune-user",
+		})
+		defer cancel()
+
+		if got := bifrostCtx.ReportingUserID(); got != "alice" {
+			t.Errorf("ReportingUserID = %q, want alice", got)
+		}
+		extraHeaders, _ := bifrostCtx.Value(schemas.BifrostContextKeyExtraHeaders).(map[string][]string)
+		if _, ok := extraHeaders["x-neptune-user"]; ok {
+			t.Error("attribution header leaked into extraHeaders (upstream forwarding)")
+		}
+	})
+
+	t.Run("not forwarded via mcp extra headers allowlist", func(t *testing.T) {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.Header.Set("x-neptune-user", "alice")
+
+		store := testHandlerStore{attributionIDHeader: "x-neptune-user"}
+		bifrostCtx, cancel := ConvertToBifrostContext(ctx, store)
+		defer cancel()
+
+		mcpExtra, _ := bifrostCtx.Value(schemas.BifrostContextKeyMCPExtraHeaders).(map[string][]string)
+		if _, ok := mcpExtra["x-neptune-user"]; ok {
+			t.Error("attribution header leaked into MCP extra headers")
+		}
+	})
 }

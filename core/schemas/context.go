@@ -411,6 +411,35 @@ func (bc *BifrostContext) Value(key any) any {
 	return bc.parent.Value(key)
 }
 
+// ReportingUserID returns the user ID for reporting (log user_id column and
+// bifrost.user.id span attribute): the authenticated user when one was
+// resolved by auth middleware, else the reporting-only label captured from a
+// configured attribution header. Callers MUST NOT use the result as an
+// authenticated identity — credential lookup, grants, and pricing read
+// BifrostContextKeyUserID directly and never see the fallback.
+func (bc *BifrostContext) ReportingUserID() string {
+	if v, _ := bc.Value(BifrostContextKeyUserID).(string); v != "" {
+		return v
+	}
+	v, _ := bc.Value(BifrostContextKeyReportingUserID).(string)
+	return v
+}
+
+// ReportingUserName returns the user name for reporting (log user_name column
+// and bifrost.user.name span attribute), following the same
+// authenticated-first precedence as ReportingUserID. Falls back to the
+// reporting user ID when only that is known.
+func (bc *BifrostContext) ReportingUserName() string {
+	if v, _ := bc.Value(BifrostContextKeyUserName).(string); v != "" {
+		return v
+	}
+	if v, _ := bc.Value(BifrostContextKeyReportingUserName).(string); v != "" {
+		return v
+	}
+	v, _ := bc.Value(BifrostContextKeyReportingUserID).(string)
+	return v
+}
+
 // AuthMode derives the per-user OAuth lookup mode from current context state.
 // Priority: UserID > VirtualKey > session. Call this at token-lookup time, not
 // in middleware — the governance plugin can inject UserID (via VK→owner

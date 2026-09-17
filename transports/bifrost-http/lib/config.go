@@ -88,6 +88,10 @@ type HandlerStore interface {
 	ShouldAllowPerRequestRawOverride() bool
 	// ShouldAllowDirectKeys returns whether callers may bypass the registered key pool via x-bf-direct-key header
 	ShouldAllowDirectKeys() bool
+	// GetAttributionHeaders returns the configured reporting-attribution header
+	// names (normalized, lowercased): the id header and the optional name header
+	// ("" when unconfigured). Both empty means attribution is disabled.
+	GetAttributionHeaders() (idHeader, nameHeader string)
 	// GetMCPExternalClientURL returns the configured external base URL Bifrost uses as the
 	// redirect_uri when acting as an OAuth client to upstream MCP servers, or empty string
 	// if not configured (falls back to dynamic Host-header-based URL).
@@ -1242,6 +1246,27 @@ func validateClientConfig(cc *configstore.ClientConfig) error {
 		return fmt.Errorf("vk_rotation_cooldown %s must not be negative", cd)
 	} else if cd > configstore.MaxVKRotationCooldown {
 		return fmt.Errorf("vk_rotation_cooldown %s exceeds the maximum of %s (30 days)", cd, configstore.MaxVKRotationCooldown)
+	}
+	// Attribution headers become lookup keys against the lowercased
+	// request-header map and are stripped from upstream forwarding, so they
+	// must normalize cleanly and must not name a credential-bearing,
+	// transport-reserved, or hop-by-hop header.
+	if ah := cc.AttributionHeaders; ah != nil {
+		if strings.TrimSpace(ah.UserID) == "" {
+			return fmt.Errorf("attribution_headers.user_id is required when attribution_headers is set")
+		}
+		for field, raw := range map[string]string{"user_id": ah.UserID, "user_name": ah.UserName} {
+			if strings.TrimSpace(raw) == "" {
+				continue
+			}
+			name, ok := schemas.NormalizeAttributionHeader(raw)
+			if !ok {
+				return fmt.Errorf("attribution_headers.%s %q is not a valid HTTP header name", field, raw)
+			}
+			if !schemas.IsAttributionHeaderAllowed(name) {
+				return fmt.Errorf("attribution_headers.%s %q is not allowed: credential-bearing, x-bf-*, and hop-by-hop headers cannot be attribution sources", field, raw)
+			}
+		}
 	}
 	return nil
 }
@@ -5668,6 +5693,25 @@ func (c *Config) ShouldAllowPerRequestRawOverride() bool {
 // ShouldAllowDirectKeys returns whether callers may bypass the registered key pool via x-bf-direct-key header.
 func (c *Config) ShouldAllowDirectKeys() bool {
 	return c.ClientConfig.AllowDirectKeys
+}
+
+// GetAttributionHeaders returns the configured reporting-attribution header
+// names, normalized to lowercase: the id header and the optional name header.
+// Invalid or disallowed entries come back empty (load-time validation rejects
+// them outright; this accessor is the last line of defense for a config that
+// bypassed it).
+func (c *Config) GetAttributionHeaders() (idHeader, nameHeader string) {
+	normalize := func(raw string) string {
+		name, ok := schemas.NormalizeAttributionHeader(raw)
+		if !ok || !schemas.IsAttributionHeaderAllowed(name) {
+			return ""
+		}
+		return name
+	}
+	if c.ClientConfig == nil || c.ClientConfig.AttributionHeaders == nil {
+		return "", ""
+	}
+	return normalize(c.ClientConfig.AttributionHeaders.UserID), normalize(c.ClientConfig.AttributionHeaders.UserName)
 }
 
 // GetMCPExternalClientURL returns the configured external base URL Bifrost uses as the

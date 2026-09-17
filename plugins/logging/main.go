@@ -2014,6 +2014,18 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 	customerName := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceCustomerName)
 	userID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserID)
 	userName := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserName)
+	// Reporting-only attribution fallback: a configured inbound header labels the
+	// request when no authenticated user was resolved. Never overrides an
+	// authenticated identity, and the reporting keys never feed credential,
+	// grant, or pricing resolution.
+	if userID == "" {
+		userID = bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyReportingUserID)
+	}
+	if userName == "" {
+		if userName = bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyReportingUserName); userName == "" {
+			userName = userID
+		}
+	}
 	businessUnitID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceBusinessUnitID)
 	businessUnitName := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceBusinessUnitName)
 	numberOfRetries := bifrost.GetIntFromContext(ctx, schemas.BifrostContextKeyNumberOfRetries)

@@ -234,6 +234,14 @@ func ResolveSessionIDFromRequest(h *fasthttp.RequestHeader) string {
 //   - x-bf-prompt-cache-auto-inject: override prompt_cache.auto_inject for this request
 //   - x-bf-send-back-raw-response: include raw provider response in the BifrostResponse returned to the caller
 //   - x-bf-store-raw-request-response: capture raw request/response for logging only (stripped from client response)
+//
+// 10. Attribution Headers (client.attribution_headers):
+//   - The configured user_id header's value labels the request's reporting identity under
+//     BifrostContextKeyReportingUserID/UserName — a reporting-only fallback for log user_id/user_name
+//     and bifrost.user.* span attributes when no authenticated user was resolved.
+//     The optional user_name header supplies the display name; the id doubles as the name otherwise.
+//   - These headers are consumed here and never forwarded upstream (also not via x-bf-eh- or a
+//     direct-forward allowlist). They never populate the authenticated user identity keys.
 
 // Parameters:
 //   - ctx: The FastHTTP request context containing the original headers
@@ -269,11 +277,13 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 	mcpHeaderCombinedAllowlist := schemas.WhiteList{}
 	allowPerRequestStorageOverride := false
 	allowPerRequestRawOverride := false
+	var attributionIDHeader, attributionNameHeader string
 	if store != nil {
 		matcher = store.GetHeaderMatcher()
 		mcpHeaderCombinedAllowlist = store.GetMCPHeaderCombinedAllowlist()
 		allowPerRequestStorageOverride = store.ShouldAllowPerRequestStorageOverride()
 		allowPerRequestRawOverride = store.ShouldAllowPerRequestRawOverride()
+		attributionIDHeader, attributionNameHeader = store.GetAttributionHeaders()
 	}
 	// Reuse a shared request-scoped context when available.
 	var bifrostCtx *schemas.BifrostContext
@@ -371,8 +381,22 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 	}
 
 	// Then process other headers
+	attributionConsumed := make(map[string]bool, 2)
+	if attributionIDHeader != "" {
+		attributionConsumed[attributionIDHeader] = true
+	}
+	if attributionNameHeader != "" {
+		attributionConsumed[attributionNameHeader] = true
+	}
 	ctx.Request.Header.All()(func(key, value []byte) bool {
 		keyStr := strings.ToLower(string(key))
+		// Configured attribution headers are consumed for reporting identity
+		// (resolved from allHeaders after this loop) and never forwarded
+		// upstream — including via an x-bf-eh- re-send or a matching
+		// direct-forward allowlist pattern.
+		if attributionConsumed[keyStr] || attributionConsumed[strings.TrimPrefix(keyStr, "x-bf-eh-")] {
+			return true
+		}
 		if keyStr == "baggage" {
 			if sessionID := ParseSessionIDFromBaggage(string(value)); sessionID != "" {
 				bifrostCtx.SetValue(schemas.BifrostContextKeyParentRequestID, sessionID)
@@ -760,6 +784,20 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 		return true
 	})
 	bifrostCtx.SetValue(schemas.BifrostContextKeyRequestHeaders, allHeaders)
+
+	// Reporting-only user attribution: the first configured attribution header
+	// carrying a valid value labels the request for reporting (log
+	// user_id/user_name columns and bifrost.user.* span attributes). These keys
+	// are never consulted for credential lookup, grants, governance, or
+	// pricing, and are never copied into the authenticated
+	// BifrostContextKeyUserID/UserName keys — when auth middleware resolved a
+	// user, it takes precedence at read time.
+	if identity, ok := schemas.AttributionIdentityFromHeaders(allHeaders, attributionIDHeader, attributionNameHeader); ok {
+		bifrostCtx.SetValue(schemas.BifrostContextKeyReportingUserID, identity.ID)
+		if identity.Name != identity.ID {
+			bifrostCtx.SetValue(schemas.BifrostContextKeyReportingUserName, identity.Name)
+		}
+	}
 
 	// Session stickiness: an explicit x-bf-session-id wins, otherwise the
 	// harness's own session header applies, so Claude Code / Codex CLI /

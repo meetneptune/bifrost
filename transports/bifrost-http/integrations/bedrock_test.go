@@ -69,6 +69,10 @@ func (m *mockHandlerStore) ShouldAllowDirectKeys() bool {
 	return false
 }
 
+func (m *mockHandlerStore) GetAttributionHeaders() (string, string) {
+	return "", ""
+}
+
 func (m *mockHandlerStore) GetMCPExternalServerURL() string {
 	return ""
 }

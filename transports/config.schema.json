@@ -231,6 +231,21 @@
           },
           "description": "Headers that must be present on every request. Requests missing any of these headers are rejected with 400. Case-insensitive matching."
         },
+        "attribution_headers": {
+          "type": "object",
+          "description": "Reporting-only user attribution from inbound headers: the request's reporting identity for logs user_id/user_name, bifrost.user.* span attributes, and dashboard user filters/rankings. Never grants authority and never affects credential lookup, grants, or pricing. Configured headers are consumed and stripped before upstream forwarding. Values are bounded (max 128 chars, no CR/LF). Credential-bearing, x-bf-*, and hop-by-hop header names are rejected. When unset (default), behavior is unchanged.",
+          "properties": {
+            "user_id": {
+              "type": "string",
+              "description": "Inbound header whose value labels the request's reporting user id (e.g. \"x-neptune-user\"). Required when attribution_headers is set."
+            },
+            "user_name": {
+              "type": "string",
+              "description": "Optional inbound header whose value labels the reporting user name. Defaults to the user id value when unset or invalid."
+            }
+          },
+          "additionalProperties": false
+        },
         "logging_headers": {
           "type": "array",
           "items": {

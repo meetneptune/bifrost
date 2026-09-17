@@ -93,6 +93,80 @@ func TestContextSpanAttributesEmit(t *testing.T) {
 // projections) without wiring its emission fails here. It also catches a stale
 // classification: a context source or "elsewhere" entry for a key no longer in
 // the registry.
+// TestContextSpanAttributesReportingUserFallback pins the reporting-only
+// attribution path: a reporting label from a configured inbound header lands on
+// bifrost.user.* when no authenticated identity is present, yields to an
+// authenticated identity when both exist, and never emits bifrost.user.email.
+func TestContextSpanAttributesReportingUserFallback(t *testing.T) {
+	newCtx := func() *schemas.BifrostContext {
+		return schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	}
+
+	t.Run("reporting only", func(t *testing.T) {
+		ctx := newCtx()
+		ctx.SetValue(schemas.BifrostContextKeyReportingUserID, "hdr-user")
+		ctx.SetValue(schemas.BifrostContextKeyReportingUserName, "Header User")
+
+		span := &schemas.Span{}
+		applyContextSpanAttributes(span, ctx)
+
+		if got := span.Attributes[schemas.AttrBifrostUserID]; got != "hdr-user" {
+			t.Errorf("user.id = %v, want hdr-user", got)
+		}
+		if got := span.Attributes[schemas.AttrBifrostUserName]; got != "Header User" {
+			t.Errorf("user.name = %v, want Header User", got)
+		}
+		if _, ok := span.Attributes[schemas.AttrBifrostUserEmail]; ok {
+			t.Error("user.email must never be set from reporting attribution")
+		}
+	})
+
+	t.Run("reporting name falls back to reporting id", func(t *testing.T) {
+		ctx := newCtx()
+		ctx.SetValue(schemas.BifrostContextKeyReportingUserID, "hdr-user")
+
+		span := &schemas.Span{}
+		applyContextSpanAttributes(span, ctx)
+
+		if got := span.Attributes[schemas.AttrBifrostUserName]; got != "hdr-user" {
+			t.Errorf("user.name = %v, want hdr-user", got)
+		}
+	})
+
+	t.Run("authenticated identity wins", func(t *testing.T) {
+		ctx := newCtx()
+		ctx.SetValue(schemas.BifrostContextKeyUserID, "auth-user")
+		ctx.SetValue(schemas.BifrostContextKeyUserName, "Auth User")
+		ctx.SetValue(schemas.BifrostContextKeyUserEmail, "auth@example.com")
+		ctx.SetValue(schemas.BifrostContextKeyReportingUserID, "hdr-user")
+		ctx.SetValue(schemas.BifrostContextKeyReportingUserName, "Header User")
+
+		span := &schemas.Span{}
+		applyContextSpanAttributes(span, ctx)
+
+		if got := span.Attributes[schemas.AttrBifrostUserID]; got != "auth-user" {
+			t.Errorf("user.id = %v, want auth-user", got)
+		}
+		if got := span.Attributes[schemas.AttrBifrostUserName]; got != "Auth User" {
+			t.Errorf("user.name = %v, want Auth User", got)
+		}
+		if got := span.Attributes[schemas.AttrBifrostUserEmail]; got != "auth@example.com" {
+			t.Errorf("user.email = %v, want auth@example.com", got)
+		}
+	})
+
+	t.Run("no identity at all", func(t *testing.T) {
+		span := &schemas.Span{}
+		applyContextSpanAttributes(span, newCtx())
+
+		for _, attr := range []string{schemas.AttrBifrostUserID, schemas.AttrBifrostUserName, schemas.AttrBifrostUserEmail} {
+			if _, ok := span.Attributes[attr]; ok {
+				t.Errorf("%s must not be emitted with no identity present", attr)
+			}
+		}
+	})
+}
+
 func TestEnrichmentRegistryDimsAllEmitted(t *testing.T) {
 	inContext := make(map[string]bool, len(contextDimSources))
 	for _, d := range contextDimSources {

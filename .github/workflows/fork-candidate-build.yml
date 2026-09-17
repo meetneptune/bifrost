@@ -1,7 +1,13 @@
 name: Fork Candidate Build
 
 # Builds reproducible "candidate" container images for the meetneptune fork and
-# pushes them to ghcr.io/meetneptune/bifrost, tagged by commit SHA.
+# pushes the same image to both registries, tagged by commit SHA:
+#   - ghcr.io/meetneptune/bifrost
+#   - us-east1-docker.pkg.dev/neptune-bifrost/bifrost/bifrost
+#
+# The Artifact Registry repository is `bifrost`; the final `/bifrost` is the
+# Docker image name required by Artifact Registry's project/repository/image
+# path format.
 #
 # Why Dockerfile.local: fork candidate images MUST be built from
 # transports/Dockerfile.local. The release Dockerfile (transports/Dockerfile)
@@ -40,6 +46,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 concurrency:
   group: fork-candidate-${{ github.ref }}
@@ -54,6 +61,7 @@ jobs:
     timeout-minutes: 60
     env:
       REGISTRY: ghcr.io
+      GAR_IMAGE: us-east1-docker.pkg.dev/neptune-bifrost/bifrost/bifrost
     steps:
       # Audit mode matches the convention used across this repo's publishing
       # workflows. Endpoints needed to build this image (all pulled inside the
@@ -64,6 +72,9 @@ jobs:
       #   registry.npmjs.org     -> npm ci in the UI build stage
       #   proxy.golang.org + dl.google.com -> Go toolchain module downloads
       #   ghcr.io -> candidate image push and imagetools inspect
+      #   us-east1-docker.pkg.dev -> Artifact Registry image push + inspect
+      #   sts.googleapis.com / iamcredentials.googleapis.com / oauth2.googleapis.com
+      #     -> Workload Identity Federation and short-lived Google credentials
       #   github.com / api.github.com / objects.githubusercontent.com
       #     -> actions/checkout and action runtime downloads
       - name: Harden Runner
@@ -77,14 +88,27 @@ jobs:
             dl.google.com:443
             ghcr.io:443
             github.com:443
+            iamcredentials.googleapis.com:443
+            oauth2.googleapis.com:443
             objects.githubusercontent.com:443
             production.cloudflare.docker.com:443
             proxy.golang.org:443
             registry-1.docker.io:443
             registry.npmjs.org:443
+            sts.googleapis.com:443
+            us-east1-docker.pkg.dev:443
 
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: projects/925309790496/locations/global/workloadIdentityPools/github/providers/github
+          service_account: ci-bifrost-pusher@neptune-bifrost.iam.gserviceaccount.com
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-east1-docker.pkg.dev --quiet
 
       - name: Set up Docker Buildx
         uses: step-security/setup-buildx-action@f931205d68723ad9589fd2a7e2ece238bf9de341 # v4.0.0
@@ -104,7 +128,7 @@ jobs:
           echo "image=${{ env.REGISTRY }}/${GHCR_REPO}" >> "$GITHUB_OUTPUT"
           echo "platforms=${PLATFORMS}" >> "$GITHUB_OUTPUT"
           echo "version=$(echo "${{ github.sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
-          echo "tags=${{ env.REGISTRY }}/${GHCR_REPO}:${{ github.sha }},${{ env.REGISTRY }}/${GHCR_REPO}:dev-candidate" >> "$GITHUB_OUTPUT"
+          echo "tags=${{ env.REGISTRY }}/${GHCR_REPO}:${{ github.sha }},${{ env.REGISTRY }}/${GHCR_REPO}:dev-candidate,${{ env.GAR_IMAGE }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push candidate image
         uses: step-security/docker-build-push-action@846549baaf047e867d038826129a64d81df0f704 # v7.1.0
@@ -122,15 +146,21 @@ jobs:
 
       - name: Record pushed digest for promotion
         run: |
-          DIGEST=$(docker buildx imagetools inspect "${{ steps.coords.outputs.image }}:${{ github.sha }}" --format '{{.Manifest.Digest}}')
+          GHCR_DIGEST=$(docker buildx imagetools inspect "${{ steps.coords.outputs.image }}:${{ github.sha }}" --format '{{.Manifest.Digest}}')
+          GAR_DIGEST=$(docker buildx imagetools inspect "${{ env.GAR_IMAGE }}:${{ github.sha }}" --format '{{.Manifest.Digest}}')
+          if [ "$GHCR_DIGEST" != "$GAR_DIGEST" ]; then
+            echo "::error::Registry digests differ: GHCR=$GHCR_DIGEST GAR=$GAR_DIGEST"
+            exit 1
+          fi
           {
             echo "## Fork candidate image pushed"
             echo
-            echo "- Image: \`${{ steps.coords.outputs.image }}\`"
-            echo "- Commit tag: \`${{ steps.coords.outputs.image }}:${{ github.sha }}\`"
-            echo "- Mutable tag: \`${{ steps.coords.outputs.image }}:dev-candidate\`"
+            echo "- GHCR image: \`${{ steps.coords.outputs.image }}\`"
+            echo "- GHCR commit tag: \`${{ steps.coords.outputs.image }}:${{ github.sha }}\`"
+            echo "- GHCR mutable tag: \`${{ steps.coords.outputs.image }}:dev-candidate\`"
+            echo "- Artifact Registry commit tag: \`${{ env.GAR_IMAGE }}:${{ github.sha }}\`"
             echo "- Platforms: \`${{ steps.coords.outputs.platforms }}\`"
-            echo "- Immutable digest: \`${{ steps.coords.outputs.image }}@${DIGEST}\`"
+            echo "- Immutable digest: \`${GHCR_DIGEST}\` (identical in both registries)"
             echo
             echo "Copy the digest above into the manual promotion step. Promotion is not performed by this workflow."
           } >> "$GITHUB_STEP_SUMMARY"

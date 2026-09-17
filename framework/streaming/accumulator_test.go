@@ -1041,3 +1041,67 @@ func TestChatStreamingFinishReasonOnTerminalChunk(t *testing.T) {
 		t.Fatalf("accumulated finish_reason = %q, want %q", *processed.Data.FinishReason, "stop")
 	}
 }
+
+// TestToBifrostResponseCarriesServedModel pins the streamed cost regression: a
+// router deployment resolves an alias server-side, and pricing ranks
+// RoutingInfo.ServerSideFallbackModel first. The accumulated response is what
+// the tracer prices, so dropping RoutingInfo there made every streamed call
+// through a router fall back to the alias — which has no catalog entry — and
+// report a cost of exactly 0 while the non-streaming path priced correctly.
+func TestToBifrostResponseCarriesServedModel(t *testing.T) {
+	const (
+		alias  = "accounts/fireworks/routers/firerouter"
+		served = "accounts/fireworks/models/glm-5p3-flash"
+	)
+
+	p := &ProcessedStreamResponse{
+		RequestID:      "req-1",
+		StreamType:     StreamTypeChat,
+		Provider:       schemas.Fireworks,
+		RequestedModel: alias,
+		ResolvedModel:  alias,
+		RoutingInfo:    schemas.RoutingInfo{ServerSideFallbackModel: schemas.Ptr(served)},
+		Data:           &AccumulatedData{TokenUsage: &schemas.BifrostLLMUsage{TotalTokens: 30}},
+	}
+
+	resp := p.ToBifrostResponse()
+	if resp == nil || resp.ChatResponse == nil {
+		t.Fatal("expected a chat response")
+	}
+
+	ef := resp.ChatResponse.ExtraFields
+	if ef.RoutingInfo.ServerSideFallbackModel == nil {
+		t.Fatal("RoutingInfo.ServerSideFallbackModel was dropped; pricing falls back to the unpriceable alias")
+	}
+	if got := *ef.RoutingInfo.ServerSideFallbackModel; got != served {
+		t.Errorf("ServerSideFallbackModel = %q, want %q", got, served)
+	}
+	if resp.ChatResponse.Model != served {
+		t.Errorf("Model = %q, want the served model %q", resp.ChatResponse.Model, served)
+	}
+	// The alias the caller asked for must still be recoverable.
+	if ef.OriginalModelRequested != alias {
+		t.Errorf("OriginalModelRequested = %q, want %q", ef.OriginalModelRequested, alias)
+	}
+}
+
+// TestToBifrostResponseWithoutFallbackKeepsRequestedModel covers the common
+// case: no alias resolution, so the requested model is the served model.
+func TestToBifrostResponseWithoutFallbackKeepsRequestedModel(t *testing.T) {
+	p := &ProcessedStreamResponse{
+		RequestID:      "req-2",
+		StreamType:     StreamTypeChat,
+		Provider:       schemas.OpenAI,
+		RequestedModel: "gpt-4o",
+		ResolvedModel:  "gpt-4o",
+		Data:           &AccumulatedData{TokenUsage: &schemas.BifrostLLMUsage{TotalTokens: 10}},
+	}
+
+	resp := p.ToBifrostResponse()
+	if resp == nil || resp.ChatResponse == nil {
+		t.Fatal("expected a chat response")
+	}
+	if resp.ChatResponse.Model != "gpt-4o" {
+		t.Errorf("Model = %q, want %q", resp.ChatResponse.Model, "gpt-4o")
+	}
+}

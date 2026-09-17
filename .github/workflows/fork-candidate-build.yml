@@ -22,7 +22,11 @@ name: Fork Candidate Build
 # (packages: write for ghcr.io). It therefore triggers ONLY on a push to the
 # fork's trusted `dev` branch or on manual workflow_dispatch by a maintainer.
 # It MUST NOT trigger on pull_request or any other event that can carry
-# forked/untrusted code. The `if: github.repository == 'meetneptune/bifrost'`
+# forked/untrusted code. GHCR retains both trusted trigger paths. Artifact
+# Registry authentication and tagging are additionally gated to
+# `refs/heads/dev`, matching its branch-scoped IAM binding; manual dispatches
+# from any other ref publish to GHCR only. The
+# `if: github.repository == 'meetneptune/bifrost'`
 # job guard is defense in depth so the workflow can never publish from another
 # repository even if this file is copied.
 #
@@ -102,12 +106,14 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Authenticate to Google Cloud
+        if: github.ref == 'refs/heads/dev'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
-          workload_identity_provider: projects/925309790496/locations/global/workloadIdentityPools/github/providers/github
+          workload_identity_provider: projects/1070843061381/locations/global/workloadIdentityPools/github-bifrost/providers/github
           service_account: ci-bifrost-pusher@neptune-bifrost.iam.gserviceaccount.com
 
       - name: Configure Docker for Artifact Registry
+        if: github.ref == 'refs/heads/dev'
         run: gcloud auth configure-docker us-east1-docker.pkg.dev --quiet
 
       - name: Set up Docker Buildx
@@ -128,7 +134,14 @@ jobs:
           echo "image=${{ env.REGISTRY }}/${GHCR_REPO}" >> "$GITHUB_OUTPUT"
           echo "platforms=${PLATFORMS}" >> "$GITHUB_OUTPUT"
           echo "version=$(echo "${{ github.sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
-          echo "tags=${{ env.REGISTRY }}/${GHCR_REPO}:${{ github.sha }},${{ env.REGISTRY }}/${GHCR_REPO}:dev-candidate,${{ env.GAR_IMAGE }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          TAGS="${{ env.REGISTRY }}/${GHCR_REPO}:${{ github.sha }},${{ env.REGISTRY }}/${GHCR_REPO}:dev-candidate"
+          # The GAR WIF binding is deliberately scoped to refs/heads/dev. Keep
+          # trusted manual builds from other refs on GHCR only; never attempt to
+          # bypass or broaden that production-image push boundary here.
+          if [ "$GITHUB_REF" = "refs/heads/dev" ]; then
+            TAGS="${TAGS},${{ env.GAR_IMAGE }}:${{ github.sha }}"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push candidate image
         uses: step-security/docker-build-push-action@846549baaf047e867d038826129a64d81df0f704 # v7.1.0
@@ -147,20 +160,30 @@ jobs:
       - name: Record pushed digest for promotion
         run: |
           GHCR_DIGEST=$(docker buildx imagetools inspect "${{ steps.coords.outputs.image }}:${{ github.sha }}" --format '{{.Manifest.Digest}}')
-          GAR_DIGEST=$(docker buildx imagetools inspect "${{ env.GAR_IMAGE }}:${{ github.sha }}" --format '{{.Manifest.Digest}}')
-          if [ "$GHCR_DIGEST" != "$GAR_DIGEST" ]; then
-            echo "::error::Registry digests differ: GHCR=$GHCR_DIGEST GAR=$GAR_DIGEST"
-            exit 1
-          fi
           {
             echo "## Fork candidate image pushed"
             echo
             echo "- GHCR image: \`${{ steps.coords.outputs.image }}\`"
             echo "- GHCR commit tag: \`${{ steps.coords.outputs.image }}:${{ github.sha }}\`"
             echo "- GHCR mutable tag: \`${{ steps.coords.outputs.image }}:dev-candidate\`"
-            echo "- Artifact Registry commit tag: \`${{ env.GAR_IMAGE }}:${{ github.sha }}\`"
             echo "- Platforms: \`${{ steps.coords.outputs.platforms }}\`"
-            echo "- Immutable digest: \`${GHCR_DIGEST}\` (identical in both registries)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$GITHUB_REF" = "refs/heads/dev" ]; then
+            GAR_DIGEST=$(docker buildx imagetools inspect "${{ env.GAR_IMAGE }}:${{ github.sha }}" --format '{{.Manifest.Digest}}')
+            if [ "$GHCR_DIGEST" != "$GAR_DIGEST" ]; then
+              echo "::error::Registry digests differ: GHCR=$GHCR_DIGEST GAR=$GAR_DIGEST"
+              exit 1
+            fi
+            {
+              echo "- Artifact Registry commit tag: \`${{ env.GAR_IMAGE }}:${{ github.sha }}\`"
+              echo "- Immutable digest: \`${GHCR_DIGEST}\` (identical in both registries)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Immutable GHCR digest: \`${GHCR_DIGEST}\` (GAR skipped: ref is not \`refs/heads/dev\`)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          {
             echo
             echo "Copy the digest above into the manual promotion step. Promotion is not performed by this workflow."
           } >> "$GITHUB_STEP_SUMMARY"

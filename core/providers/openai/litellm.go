@@ -24,6 +24,25 @@ type liteLLMResponseMetadata struct {
 }
 
 func parseLiteLLMResponseMetadata(headers map[string]string) *liteLLMResponseMetadata {
+	// The served model is read independently of cost. A streaming response
+	// carries X-Litellm-Model-Name but no X-Litellm-Response-Cost: headers are
+	// flushed before the first token, so LiteLLM cannot know the cost yet and
+	// sends every cost field as 0.0 with the total omitted. Returning early on
+	// the missing total would discard the served model as well, and that model
+	// is what lets pricing key on the backend that actually ran.
+	model, _ := getResponseHeader(headers, liteLLMModelNameHeader)
+	model = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(model), liteLLMFireworksModelPrefix))
+
+	cost := parseLiteLLMCost(headers)
+	if cost == nil && model == "" {
+		return nil
+	}
+	return &liteLLMResponseMetadata{cost: cost, model: model}
+}
+
+// parseLiteLLMCost returns the provider-reported cost, or nil when LiteLLM did
+// not report one. Nil means "unknown", never "free".
+func parseLiteLLMCost(headers map[string]string) *schemas.BifrostCost {
 	totalRaw, ok := getResponseHeader(headers, liteLLMResponseCostHeader)
 	if !ok {
 		return nil
@@ -60,9 +79,7 @@ func parseLiteLLMResponseMetadata(headers map[string]string) *liteLLMResponseMet
 		}
 	}
 
-	model, _ := getResponseHeader(headers, liteLLMModelNameHeader)
-	model = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(model), liteLLMFireworksModelPrefix))
-	return &liteLLMResponseMetadata{cost: cost, model: model}
+	return cost
 }
 
 func parseLiteLLMResponseMetadataFromContext(ctx *schemas.BifrostContext) *liteLLMResponseMetadata {
@@ -102,11 +119,17 @@ func applyLiteLLMChatResponseMetadata(response *schemas.BifrostChatResponse, met
 	if response == nil || metadata == nil {
 		return
 	}
-	if response.Usage == nil {
-		response.Usage = &schemas.BifrostLLMUsage{}
-	}
-	if response.Usage.Cost == nil {
-		response.Usage.Cost = metadata.cost
+	// Only attach a cost LiteLLM actually reported. When it reported none the
+	// served model below re-keys pricing onto the backend, and Bifrost prices
+	// the tokens itself; fabricating a zero here would suppress that and read
+	// as a free call.
+	if metadata.cost != nil {
+		if response.Usage == nil {
+			response.Usage = &schemas.BifrostLLMUsage{}
+		}
+		if response.Usage.Cost == nil {
+			response.Usage.Cost = metadata.cost
+		}
 	}
 	applyLiteLLMServedModel(&response.Model, &response.ExtraFields, metadata.model)
 }
@@ -115,11 +138,15 @@ func applyLiteLLMResponsesResponseMetadata(response *schemas.BifrostResponsesRes
 	if response == nil || metadata == nil {
 		return
 	}
-	if response.Usage == nil {
-		response.Usage = &schemas.ResponsesResponseUsage{}
-	}
-	if response.Usage.Cost == nil {
-		response.Usage.Cost = metadata.cost
+	// See applyLiteLLMChatResponseMetadata: attach only a reported cost, so a
+	// stream without one falls through to catalog pricing on the served model.
+	if metadata.cost != nil {
+		if response.Usage == nil {
+			response.Usage = &schemas.ResponsesResponseUsage{}
+		}
+		if response.Usage.Cost == nil {
+			response.Usage.Cost = metadata.cost
+		}
 	}
 	applyLiteLLMServedModel(&response.Model, &response.ExtraFields, metadata.model)
 }

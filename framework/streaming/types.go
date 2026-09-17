@@ -324,6 +324,19 @@ type ProcessedStreamResponse struct {
 	RawRequest     *interface{}
 }
 
+// servedModel returns the model that actually produced the response. A router
+// deployment resolves an alias server-side, and the provider reports the real
+// model back; RoutingInfo.ServerSideFallbackModel carries it. Pricing ranks
+// that same field first, so returning it here keeps the reported model and the
+// billed model in agreement. Falls back to the requested model when no alias
+// was resolved, which is the common case.
+func (p *ProcessedStreamResponse) servedModel() string {
+	if p.RoutingInfo.ServerSideFallbackModel != nil && *p.RoutingInfo.ServerSideFallbackModel != "" {
+		return *p.RoutingInfo.ServerSideFallbackModel
+	}
+	return p.RequestedModel
+}
+
 // ToBifrostResponse converts a ProcessedStreamResponse to a BifrostResponse
 func (p *ProcessedStreamResponse) ToBifrostResponse() *schemas.BifrostResponse {
 	if p.Data == nil {
@@ -341,7 +354,7 @@ func (p *ProcessedStreamResponse) ToBifrostResponse() *schemas.BifrostResponse {
 		textResp := &schemas.BifrostTextCompletionResponse{
 			ID:     p.RequestID,
 			Object: "text_completion",
-			Model:  p.RequestedModel,
+			Model:  p.servedModel(),
 			Choices: []schemas.BifrostResponseChoice{
 				{
 					Index:        0,
@@ -362,6 +375,7 @@ func (p *ProcessedStreamResponse) ToBifrostResponse() *schemas.BifrostResponse {
 			OriginalModelRequested: p.RequestedModel,
 			ResolvedModelUsed:      p.ResolvedModel,
 			Latency:                p.Data.Latency,
+			RoutingInfo:            p.RoutingInfo,
 		}
 		if p.RawRequest != nil {
 			resp.TextCompletionResponse.ExtraFields.RawRequest = p.RawRequest
@@ -395,7 +409,7 @@ func (p *ProcessedStreamResponse) ToBifrostResponse() *schemas.BifrostResponse {
 		chatResp := &schemas.BifrostChatResponse{
 			ID:      p.RequestID,
 			Object:  "chat.completion",
-			Model:   p.RequestedModel,
+			Model:   p.servedModel(),
 			Created: int(p.Data.StartTimestamp.Unix()),
 			Choices: []schemas.BifrostResponseChoice{
 				{
@@ -417,6 +431,7 @@ func (p *ProcessedStreamResponse) ToBifrostResponse() *schemas.BifrostResponse {
 			OriginalModelRequested: p.RequestedModel,
 			ResolvedModelUsed:      p.ResolvedModel,
 			Latency:                p.Data.Latency,
+			RoutingInfo:            p.RoutingInfo,
 		}
 		if p.RawRequest != nil {
 			resp.ChatResponse.ExtraFields.RawRequest = p.RawRequest
@@ -445,6 +460,7 @@ func (p *ProcessedStreamResponse) ToBifrostResponse() *schemas.BifrostResponse {
 			OriginalModelRequested: p.RequestedModel,
 			ResolvedModelUsed:      p.ResolvedModel,
 			Latency:                p.Data.Latency,
+			RoutingInfo:            p.RoutingInfo,
 		}
 		if p.RawRequest != nil {
 			responsesResp.ExtraFields.RawRequest = p.RawRequest
@@ -471,6 +487,7 @@ func (p *ProcessedStreamResponse) ToBifrostResponse() *schemas.BifrostResponse {
 			OriginalModelRequested: p.RequestedModel,
 			ResolvedModelUsed:      p.ResolvedModel,
 			Latency:                p.Data.Latency,
+			RoutingInfo:            p.RoutingInfo,
 		}
 		if p.RawRequest != nil {
 			resp.SpeechResponse.ExtraFields.RawRequest = p.RawRequest
@@ -496,6 +513,7 @@ func (p *ProcessedStreamResponse) ToBifrostResponse() *schemas.BifrostResponse {
 			OriginalModelRequested: p.RequestedModel,
 			ResolvedModelUsed:      p.ResolvedModel,
 			Latency:                p.Data.Latency,
+			RoutingInfo:            p.RoutingInfo,
 		}
 		if p.RawRequest != nil {
 			resp.TranscriptionResponse.ExtraFields.RawRequest = p.RawRequest
@@ -533,6 +551,7 @@ func (p *ProcessedStreamResponse) ToBifrostResponse() *schemas.BifrostResponse {
 			OriginalModelRequested: p.RequestedModel,
 			ResolvedModelUsed:      p.ResolvedModel,
 			Latency:                p.Data.Latency,
+			RoutingInfo:            p.RoutingInfo,
 		}
 		if p.RawRequest != nil {
 			resp.ImageGenerationResponse.ExtraFields.RawRequest = p.RawRequest

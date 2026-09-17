@@ -150845,6 +150845,116 @@
           "response": []
         }
       ]
+    },
+    {
+      "name": "93. FireRouter provider cost headers (firerouter-cost)",
+      "description": "Pins FireRouter's LiteLLM response-cost and resolved-model headers across non-streaming and streaming chat. The dbverify reporter requires persisted logs cost>0 for each x-request-id; response assertions require the served backend model path rather than the requested router id.",
+      "item": [
+        {
+          "name": "fireworks firerouter non-streaming provider cost and served model (firerouter-cost)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-request-id",
+                "value": "firerouter-cost-chat-{{$guid}}"
+              },
+              {
+                "key": "x-bf-expect-cost",
+                "value": "true"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"fireworks/accounts/fireworks/routers/firerouter\",\n  \"messages\": [{\"role\": \"user\", \"content\": \"Reply with the word hello.\"}],\n  \"max_tokens\": 16\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('[FireRouter cost] non-streaming response exposes backend model', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "  var model = pm.response.json().model || '';",
+                  "  pm.expect(model).to.match(/^accounts\\/fireworks\\/models\\//);",
+                  "  pm.expect(model).to.not.include('/routers/firerouter');",
+                  "});",
+                  "// Persisted cost>0 is asserted by newman-reporter-dbverify via x-bf-expect-cost."
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "fireworks firerouter streaming provider cost and served model (firerouter-cost)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "x-request-id",
+                "value": "firerouter-cost-stream-{{$guid}}"
+              },
+              {
+                "key": "x-bf-expect-cost",
+                "value": "true"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"fireworks/accounts/fireworks/routers/firerouter\",\n  \"messages\": [{\"role\": \"user\", \"content\": \"Reply with the word hello.\"}],\n  \"stream\": true,\n  \"stream_options\": {\"include_usage\": true},\n  \"max_tokens\": 16\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/chat/completions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('[FireRouter cost] streaming terminal chunk exposes backend model', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                  "  pm.expect(pm.response.text()).to.match(/\\\"model\\\":\\\"accounts\\/fireworks\\/models\\//);",
+                  "});",
+                  "// Persisted final stream cost>0 is asserted by newman-reporter-dbverify via x-bf-expect-cost."
+                ]
+              }
+            }
+          ]
+        }
+      ]
     }
   ]
 }

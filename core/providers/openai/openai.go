@@ -1061,6 +1061,7 @@ func HandleOpenAIChatCompletionRequest(
 	}
 
 	response.ExtraFields.Latency = latency.Milliseconds()
+	applyLiteLLMChatResponseMetadata(response, parseLiteLLMResponseMetadata(providerResponseHeaders))
 
 	// Set raw request if enabled
 	if providerUtils.ShouldSendBackRawRequest(ctx, sendBackRawRequest) {
@@ -1748,6 +1749,7 @@ func HandleOpenAIChatCompletionStreaming(
 				if usageSeen && pendingFinalEvent.Response != nil {
 					pendingFinalEvent.Response.Usage = usage.ToResponsesResponseUsage()
 				}
+				applyLiteLLMResponsesResponseMetadata(pendingFinalEvent.Response, parseLiteLLMResponseMetadataFromContext(ctx))
 				if sendBackRawRequest {
 					providerUtils.ParseAndSetRawRequest(&pendingFinalEvent.ExtraFields, jsonBody)
 				}
@@ -1774,6 +1776,7 @@ func HandleOpenAIChatCompletionStreaming(
 			if postResponseConverter != nil {
 				response = postResponseConverter(response)
 			}
+			applyLiteLLMChatResponseMetadata(response, parseLiteLLMResponseMetadataFromContext(ctx))
 			// Preserve captured tier so priority/flex billing applies to the streamed response
 			if serviceTier != nil {
 				response.ServiceTier = serviceTier
@@ -1975,6 +1978,7 @@ func HandleOpenAIResponsesRequest(
 
 	response.ExtraFields.Latency = latency.Milliseconds()
 	response.ExtraFields.ProviderResponseHeaders = providerResponseHeaders
+	applyLiteLLMResponsesResponseMetadata(response, parseLiteLLMResponseMetadata(providerResponseHeaders))
 
 	// Set raw request if enabled
 	if sendBackRawRequest {
@@ -2297,6 +2301,7 @@ func HandleOpenAIResponsesStreaming(
 
 			response.ExtraFields.ChunkIndex = response.SequenceNumber
 			if response.Type == schemas.ResponsesStreamResponseTypeCompleted || response.Type == schemas.ResponsesStreamResponseTypeIncomplete {
+				applyLiteLLMResponsesResponseMetadata(response.Response, parseLiteLLMResponseMetadataFromContext(ctx))
 				// Set raw request if enabled
 				if sendBackRawRequest {
 					providerUtils.ParseAndSetRawRequest(&response.ExtraFields, jsonBody)

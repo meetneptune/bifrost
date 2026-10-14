@@ -1,5 +1,17 @@
-- feat: MCP tool logs record governance entity names beside their IDs, so the plugin stamps `user_name`, `team_name`, `customer_name`, `business_unit_name` and the multi-valued team, customer and business-unit sets onto the log entry at ingestion instead of leaving the dashboard to render raw UUIDs (#7154)
-- feat: endpoint-attributed MCP inspections carry bounded identity (device, app key, server label, tool name, decision) from the gateway into the MCP authorization path, so an inspected tool call is attributed without trusting payload-supplied headers (#6959)
-- feat: governance errors are classified into the normalized `error_type` vocabulary, so a 429 raised by a governance rate limit is distinguishable from an upstream 429 on `bifrost_error_requests_total` (#7141)
-- feat: model allow and block lists accept `regex:` entries. The `*_patterns` fields added earlier in this release window were withdrawn in favour of the prefix form, which needs no new schema fields (#6988, #7133, #7134)
-- fix: `UsageTracker.Cleanup()` cancels and waits for the periodic reset worker before taking its final budget and rate-limit snapshots. It previously dumped first, so `trackerCancel()` could cancel an in-flight rate-limit dump and fail with `failed to dump rate limits to database: context canceled`, and the final dump was not guaranteed to be the tracker's last database writer. A queued ticker event can no longer start another reset cycle during shutdown, the current cycle stops when the tracker context is cancelled, and `context.Canceled` is treated as an expected result only when that context was actually cancelled (#7099) [@Constantine3](https://github.com/Constantine3)
+- feat: bind files, batches, videos, containers and cached contents to the creating virtual key under every id form the provider accepts, behind enforce_vk_object_ownership
+- feat: require a model (or a provider-wide grant) for file-based batches under model-restricted virtual keys, following a custom provider's base type
+- feat: team, business unit and customer access profile limit holders and permits; refuse an entity's own limits when a profile governs it
+- feat: per-agent access checks with virtual-key agent grants and allow_by_default
+- feat: bill live sessions per window without counting each window as a request, and evaluate live sidebands through pre-hooks without a model
+- feat: let provider-injected MCP tools past client and request tool filters
+- feat: stamp the virtual key's content-logging decision on the request and root span
+- feat: serve Warp for signed-in users without an access profile
+- feat: implement HTTPTransportResponseHeadersHook as a no-op
+- fix: check every model a passthrough body names and refuse model-less passthrough under model-restricted keys
+- fix: canonicalise model config keys across aliases, prefixes and casing
+- fix: include the fallback index in billing dedup so fallback usage is billed
+- fix: preserve team calendar alignment after restart
+- fix: load balancer treats negative weights as 0
+- fix: scope code-mode tool discovery to the request's grant
+- fix: dump only changed budget and rate-limit rows
+- chore: upgraded core to v1.12.0 and framework to v1.9.0

@@ -1,1 +1,6 @@
-- fix: a continuation turn, such as a tool result following a prior user message, is classified instead of skipped when no active session state is found. `BuildInputWithDisposition` now returns the populated `ComplexityInput` including `LastUserText` for trailing-continuation turns in both the chat and responses paths, and `computeComplexity` falls back to classifying that recovered text, so new or recovered sessions get a tier assignment; the skip path applies only when `LastUserText` is also empty (#7122)
+- feat: decision-model complexity classifier (TypeSafe Jev, Laya, Nimble, Clef and OpenAI decision models) as primary or semantic fallback, with per-tier guidance and decision cost tracking
+- feat: send complexity classification decisions in the list shape
+- feat: ttft_timeout_ms sets the first-token deadline for streaming attempts
+- fix: LLM fallback classifier no longer sends temperature 0
+- chore: read embedding input through the new item shape
+- chore: upgraded core to v1.12.0 and framework to v1.9.0

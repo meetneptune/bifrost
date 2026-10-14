@@ -1,6 +1,22 @@
-- feat: MCP tool log rows carry governance entity names alongside their IDs, written from the request context at ingestion, so nothing is resolved on read (#7154)
-- feat: endpoint-attributed MCP observations are written onto both the pending and the final MCP tool log entry, with the observation snapshotted so it cannot alias across async entries (#6959)
-- feat: cost recalculation honours time-of-day peak and off-peak pricing, scaling usage-based charges by `off_peak_cost_multiplier` when a request falls outside every declared peak window (#6575)
-- feat: GA realtime transcription sessions are logged and priced through the standard pipeline with transcription-aware pricing (#7089)
-- fix: a request whose caller disconnected before the upstream finished is logged and finalized deterministically rather than roughly half the time, so abandoned requests no longer leave a log row stuck in its pending state (#6972)
-- docs: clarified that `CountRecalcTargets` reads a materialized view that can lag, so its `Total` is an approximation rather than an exact count (#7078)
+- feat: log A2A operations and stream events as agent log rows, with session grouping and raw capture
+- feat: one log row per live session with transcript, delegations and costs; log live sideband attachments and record failed delegations without failing the session
+- feat: log decision requests and answers in the list shape and record decision classifier calls in routing costs
+- feat: store embedding request inputs in embedding_input
+- feat: carry tool_usage through log serialization for repricing
+- feat: store bifrost's cost breakdown for providers that ignore reported cost
+- feat: log shell and apply_patch items
+- feat: merge load balancer attempt decisions into log metadata
+- feat: honour the virtual key's content-logging decision in the log store and drop MCP arguments when content is disabled late
+- feat: hand completed logs to the Warp log indexer
+- feat: report cost recalculation progress to the background jobs list
+- feat: export the cost breakdown on log spans
+- feat: log refusal, content_filter and safety stop reasons as model_refusal errors
+- feat: implement HTTPTransportResponseHeadersHook as a no-op
+- fix: project custom and local shell tool calls into logged tool_calls
+- fix: add batch ID attribute to settlement spans
+- fix: store binary log bodies as a size placeholder
+- fix: persist evicted pending logs and update them when the response arrives
+- fix: pause batch writes while a logstore migration holds its lock
+- fix: retry transient batch write failures whole instead of falling back per row
+- fix: page cost recalculation by keyset without per-page counts
+- chore: upgraded core to v1.12.0 and framework to v1.9.0

@@ -66,6 +66,13 @@ Workflow: `.github/workflows/fork-upstream-sync.yml` (weekly)
 - PR creation needs the repo setting "Allow GitHub Actions to create and approve pull requests" or the secret `SYNC_PR_TOKEN` (fine-grained PAT, contents and pull-requests write). Without either, the job pushes the branch, prints the compare URL in the run summary, and fails with an error that names this fix. A PR from `GITHUB_TOKEN` does not trigger checks: run `gh workflow run fork-pr-tests.yml --ref upstream-sync/<tag>` or use the PAT.
 - Never auto-merges. If a sync PR is red, the fork stays on its current baseline until a human fixes it.
 
+## CI checks
+
+- Required on every PR to `dev`: `Build and key-free tests` (fork-pr-tests.yml) and `dependency-review` (dependency-review.yml). Both run on every PR without a path filter.
+- Upstream-owned workflows are kept on `dev`'s version during sync. A fork guard (`if: github.repository == 'maximhq/bifrost'`) therefore survives later syncs. Never delete an upstream workflow file; guard it.
+- Guarded in the fork: all release and publish jobs, CodSpeed, Live Tests, Snyk, OpenSSF Scorecard, Dependabot Alerts to Issues, and the upstream egress-allowlist lint (`Workflow Lint`).
+- CodeQL uses GitHub's default setup (a repository setting, not a workflow file). `Analyze (go)` takes about 20 minutes, and the aggregate `CodeQL` check can report a missing Go configuration if it posts before the Go analysis uploads. Do not require `CodeQL` or `Analyze (*)`. Existing alerts are in upstream code.
+
 ## What NOT to do
 
 - **Don't push to upstream namespaces.** `release-pipeline.yml`, `npx-publish.yml`, and `helm-release.yml` are upstream release machinery (guarded to `maximhq/bifrost`). Do not trigger, "fix", or unguard them from the fork; do not reuse their secrets or registries for fork builds.

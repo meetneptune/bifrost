@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   create-issues:
+    # Fork: files GitHub issues, and issues are disabled in the fork (gh returns 403).
+    if: github.repository == 'maximhq/bifrost'
     runs-on: ubuntu-latest
     steps:
       - name: Harden Runner

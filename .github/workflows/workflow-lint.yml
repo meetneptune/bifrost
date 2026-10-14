@@ -14,6 +14,8 @@ permissions:
 
 jobs:
   check-egress-allowlist:
+    # Fork: this lint checks the egress allowlists of upstream's release-pipeline.yml and run-core-tests.yml, which never run here (release jobs are guarded; the provider harness is not run in the fork), and it fails the same way on pristine transports/v2.3.0.
+    if: github.repository == 'maximhq/bifrost'
     name: Egress allowlist covers apt + provider-harness hosts
     runs-on: ubuntu-latest
     timeout-minutes: 5

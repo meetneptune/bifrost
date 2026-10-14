@@ -58,9 +58,13 @@ Human-review gate, no exceptions: the digest being promoted must be one a human 
 
 Workflow: `.github/workflows/fork-upstream-sync.yml` (weekly)
 
-- Watches upstream stable `transports/v*` tags and opens **one reviewable PR per tag into `dev`**.
-- Conflicts and build failures are surfaced *in that PR* for a human to resolve.
-- Never force-pushes, never auto-merges. If a sync PR is red, the fork stays on its current baseline until a human fixes it.
+- Watches upstream stable `transports/v*` tags (never pre-releases, never upstream `dev`) and opens **one reviewable PR per tag into `dev`**.
+- On conflicts it commits the merge with the markers in place on `upstream-sync/<tag>` and opens a **draft** PR that lists each conflicting file. Resolve on that branch, push, and mark the PR ready.
+- Files under `.github/workflows` keep `dev`'s version (a `GITHUB_TOKEN` push cannot change them, and the upstream release workflows are guarded off in the fork). The PR body lists the upstream changes to them.
+- An existing sync branch that already has commits beyond `dev` is never rebuilt or force-pushed.
+- `workflow_dispatch` accepts `tag` (pin a release) and `dry_run` (print the PR body in the run summary; push nothing).
+- PR creation needs the repo setting "Allow GitHub Actions to create and approve pull requests" or the secret `SYNC_PR_TOKEN` (fine-grained PAT, contents and pull-requests write). Without either, the job pushes the branch, prints the compare URL in the run summary, and fails with an error that names this fix. A PR from `GITHUB_TOKEN` does not trigger checks: run `gh workflow run fork-pr-tests.yml --ref upstream-sync/<tag>` or use the PAT.
+- Never auto-merges. If a sync PR is red, the fork stays on its current baseline until a human fixes it.
 
 ## What NOT to do
 

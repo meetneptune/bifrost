@@ -3,6 +3,18 @@ name: Fork Upstream Sync
 # Tracks stable upstream (maximhq/bifrost) `transports/v*` releases and opens
 # ONE reviewable PR per tag into `dev` so the fork can absorb upstream changes
 # deliberately. Never auto-merges, never pushes to `dev`, never auto-closes.
+#
+# Conflicts: the merge is committed WITH conflict markers on the sync branch and
+# the PR is opened as a draft that names every conflicting file, so the work is
+# visible and resolvable in place. An existing sync branch that already holds
+# commits beyond `dev` is never rebuilt or force-pushed.
+#
+# Credentials: the default GITHUB_TOKEN cannot create PRs unless the repo
+# setting "Allow GitHub Actions to create and approve pull requests" is on, and
+# PRs it opens do not trigger other workflows. Set the optional secret
+# SYNC_PR_TOKEN (fine-grained PAT: contents + pull-requests write) to avoid
+# both limits. If PR creation is refused, the job prints the branch, compare
+# URL and conflict list in the run summary and fails with an actionable error.
 
 on:
   schedule:
@@ -13,6 +25,11 @@ on:
         description: "Pin a specific upstream release tag (e.g. transports/v2.2.0) instead of the latest stable transports tag"
         required: false
         type: string
+      dry_run:
+        description: "Compute the merge and print the PR body in the run summary; push nothing, open no PR"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write # push the workflow-owned upstream-sync/* branch
@@ -30,8 +47,6 @@ jobs:
     if: github.repository == 'meetneptune/bifrost'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@fe104658747b27e96e4f7e80cd0a94068e53901d # v2.16.1
@@ -44,6 +59,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          # No credential stays in .git/config: the compatibility build compiles
+          # upstream code. The push and PR steps receive the token explicitly.
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
@@ -64,7 +82,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${INPUT_TAG}" ]; then
-            # Manual dispatch: validate the pinned tag exists upstream.
+            # Manual dispatch: same stable-release pattern as the scheduled path.
+            if ! printf '%s\n' "${INPUT_TAG}" | grep -Eq '^transports/v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Pinned tag '${INPUT_TAG}' must match transports/vX.Y.Z (no pre-release suffix)" >&2
+              exit 1
+            fi
             if ! git rev-parse -q --verify "refs/tags/${INPUT_TAG}" >/dev/null; then
               echo "::error::Pinned tag '${INPUT_TAG}' does not exist. Fetched upstream tags include:" >&2
               git tag -l 'transports/v*' | sort -V | tail -10 >&2
@@ -93,51 +115,105 @@ jobs:
         # The sync branch name embeds the tag, so an existing PR for it is the
         # dedup signal handled below. This step only short-circuits when the
         # tag is already an ancestor of dev — nothing left to absorb.
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+          SYNC_BRANCH: ${{ steps.target.outputs.sync_branch }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if git merge-base --is-ancestor "${{ steps.target.outputs.tag }}" origin/dev; then
-            echo "${{ steps.target.outputs.tag }} is already contained in origin/dev — nothing to sync."
+          if git merge-base --is-ancestor "${TAG}" origin/dev; then
+            echo "${TAG} is already contained in origin/dev — nothing to sync."
             echo "skip=true" >> "${GITHUB_ENV}"
-          else
-            echo "skip=false" >> "${GITHUB_ENV}"
+            exit 0
           fi
+          # A sync PR closed without merging is a human decision: do not
+          # recreate it every week. Reopen it or delete the branch to retry.
+          CLOSED="$(gh pr list --base dev --head "${SYNC_BRANCH}" --state closed --json number,mergedAt --jq '[.[] | select(.mergedAt == null)][0].number // empty')"
+          if [ -n "${CLOSED}" ]; then
+            echo "::notice::Sync PR #${CLOSED} for ${TAG} was closed without merging; skipping. Reopen it or pin a newer tag to sync again."
+            echo "skip=true" >> "${GITHUB_ENV}"
+            exit 0
+          fi
+          echo "skip=false" >> "${GITHUB_ENV}"
 
       - name: Create sync branch and merge upstream tag
         if: env.skip == 'false'
         id: merge
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+          SYNC_BRANCH: ${{ steps.target.outputs.sync_branch }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.target.outputs.tag }}"
-          SYNC_BRANCH="${{ steps.target.outputs.sync_branch }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Rebuild the sync branch fresh from latest origin/dev every run.
-          # The branch is workflow-owned; the runner starts clean each time,
-          # so force-with-lease on push (below) never overwrites human work.
+          BASE_SHA="$(git merge-base origin/dev "${TAG}")"
+          {
+            echo "base_tag=$(git describe --tags --abbrev=0 --match 'transports/v*' "${BASE_SHA}" 2>/dev/null || echo unknown)"
+            echo "upstream_commits=$(git rev-list --count "${BASE_SHA}..${TAG}")"
+          } >> "${GITHUB_OUTPUT}"
+
+          # Never rebuild a branch that already carries work beyond dev (an
+          # earlier conflict commit or a human resolution).
+          if git fetch origin "${SYNC_BRANCH}" 2>/dev/null \
+            && [ -n "$(git rev-list -n1 origin/dev..FETCH_HEAD)" ]; then
+            git checkout -B "${SYNC_BRANCH}" FETCH_HEAD
+            echo "existing=true" >> "${GITHUB_OUTPUT}"
+            echo "conflicts=unknown" >> "${GITHUB_OUTPUT}"
+            echo "Branch ${SYNC_BRANCH} already has commits beyond dev — left untouched."
+            exit 0
+          fi
+          echo "existing=false" >> "${GITHUB_OUTPUT}"
+
           git checkout -B "${SYNC_BRANCH}" origin/dev
 
-          # Attempt the merge WITHOUT committing so conflicts can be detected.
+          # A GITHUB_TOKEN push cannot create or update files under
+          # .github/workflows, and that tree is upstream's release machinery,
+          # guarded off in the fork. Keep dev's version of the whole tree and
+          # report what upstream changed there.
+          git diff --name-only "${BASE_SHA}" "${TAG}" -- .github/workflows > /tmp/upstream-workflow-changes.txt
+
           if git merge --no-commit --no-ff "${TAG}"; then
-            git commit -m "chore: merge upstream ${TAG} into dev"
+            MERGE_RC=0
+          else
+            MERGE_RC=1
+          fi
+          git ls-files -z .github/workflows | while IFS= read -r -d '' f; do
+            git cat-file -e "origin/dev:${f}" 2>/dev/null || git rm -qf -- "${f}"
+          done
+          git checkout origin/dev -- .github/workflows
+
+          git diff --name-only --diff-filter=U > /tmp/conflicts.txt
+          if [ -s /tmp/conflicts.txt ]; then
+            # Commit the markers so the branch differs from dev and a PR can
+            # exist; the PR is a draft and names each file.
+            git add -A
+            git commit -q -m "chore: merge upstream ${TAG} into dev (unresolved conflicts)"
+            echo "conflicts=true" >> "${GITHUB_OUTPUT}"
+            echo "Merge of ${TAG} has conflicts:"; cat /tmp/conflicts.txt
+          elif [ "${MERGE_RC}" -ne 0 ] && [ ! -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
+            echo "::error::git merge failed without conflicts (see log above)"
+            exit 1
+          else
+            git commit -q -m "chore: merge upstream ${TAG} into dev"
             echo "conflicts=false" >> "${GITHUB_OUTPUT}"
             echo "Merge of ${TAG} completed cleanly."
-          else
-            # Conflicts: do NOT force-resolve. Abort, push the plain base
-            # branch, and let the PR describe the conflict + manual step.
-            git merge --abort || true
-            git reset --hard origin/dev
-            echo "conflicts=true" >> "${GITHUB_OUTPUT}"
-            echo "Merge of ${TAG} has conflicts — pushing base branch; PR will document manual resolution."
           fi
 
       - name: Push sync branch
-        if: env.skip == 'false'
+        if: env.skip == 'false' && steps.merge.outputs.existing == 'false' && inputs.dry_run != true
+        env:
+          SYNC_BRANCH: ${{ steps.target.outputs.sync_branch }}
+          PUSH_TOKEN: ${{ secrets.SYNC_PR_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Never force-push without lease, and NEVER touch dev — only the
-          # workflow-owned upstream-sync/* branch is pushed here.
-          git push --force-with-lease origin "${{ steps.target.outputs.sync_branch }}"
+          AUTH="$(printf 'x-access-token:%s' "${PUSH_TOKEN}" | base64 | tr -d '\n')"
+          echo "::add-mask::${AUTH}"
+          # Only the workflow-owned upstream-sync/* branch is pushed; never dev.
+          # The merge step left any existing branch with work untouched, so the
+          # lease only guards a branch that is empty relative to dev.
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH}" \
+            push --force-with-lease origin "${SYNC_BRANCH}"
 
       - name: Compatibility build check
         if: env.skip == 'false' && steps.merge.outputs.conflicts == 'false'
@@ -155,10 +231,10 @@ jobs:
           BUILD_RC=$?
           if [ ${BUILD_RC} -eq 0 ]; then
             echo "result=pass" >> "${GITHUB_OUTPUT}"
-            echo "✅ Compatibility build passed (core, framework, transports)."
+            echo "Compatibility build passed (core, framework, transports)."
           else
             echo "result=fail" >> "${GITHUB_OUTPUT}"
-            echo "❌ Compatibility build FAILED (exit ${BUILD_RC}). Log tail:"
+            echo "Compatibility build FAILED (exit ${BUILD_RC}). Log tail:"
             tail -40 /tmp/build.log || true
           fi
           # Never fail the workflow: the result belongs in the PR body.
@@ -169,73 +245,117 @@ jobs:
         env:
           TAG: ${{ steps.target.outputs.tag }}
           SYNC_BRANCH: ${{ steps.target.outputs.sync_branch }}
+          EXISTING: ${{ steps.merge.outputs.existing }}
           CONFLICTS: ${{ steps.merge.outputs.conflicts }}
           BUILD_RESULT: ${{ steps.build.outputs.result }}
+          BASE_TAG: ${{ steps.merge.outputs.base_tag }}
+          UPSTREAM_COMMITS: ${{ steps.merge.outputs.upstream_commits }}
+          INPUT_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          GH_TOKEN: ${{ secrets.SYNC_PR_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
+          # shellcheck disable=SC2016  # backticks in echo are literal Markdown
           set -euo pipefail
+          FENCE="$(printf '\140\140\140')"
           TITLE="chore: sync upstream ${TAG} into dev"
+          COMPARE="https://github.com/${GITHUB_REPOSITORY}/compare/dev...${SYNC_BRANCH}?expand=1"
 
           {
             echo "## Upstream sync: \`${TAG}\`"
             echo ""
             echo "- **Upstream tag:** [\`${TAG}\`](https://github.com/maximhq/bifrost/releases/tag/${TAG})"
-            if [ -n "${{ inputs.tag }}" ]; then
+            if [ "${EXISTING}" = "false" ]; then
+              echo "- **Range:** ${UPSTREAM_COMMITS} upstream commits since \`${BASE_TAG}\` (merge base of \`dev\` and the tag)"
+            fi
+            if [ -n "${INPUT_TAG}" ]; then
               echo "- **Selection:** manually pinned via \`workflow_dispatch\` input"
             else
               echo "- **Selection:** latest **stable** \`transports/v*\` release (pre-release tags like \`-rc\`/\`-beta\`/\`-alpha\` are excluded)"
             fi
             echo ""
-            echo "### Compatibility build"
-            if [ "${CONFLICTS}" = "true" ]; then
+            echo "### Merge status"
+            echo ""
+            if [ "${EXISTING}" = "true" ]; then
+              echo "The sync branch already holds commits beyond \`dev\` and was left as is. Check it for unresolved conflict markers before merging."
+            elif [ "${CONFLICTS}" = "true" ]; then
+              echo "**Merge conflicts: resolve before merging.** This draft PR holds the merge with the markers committed. Conflicting files:"
               echo ""
-              echo "⚠️ **Skipped** — the merge has conflicts (see below). Run the build after resolving them."
-            elif [ "${BUILD_RESULT}" = "pass" ]; then
+              awk '{printf "- \140%s\140\n", $0}' /tmp/conflicts.txt
               echo ""
-              echo "✅ **Pass** — \`go build ./core/... ./framework/... ./transports/...\` (with UI stub) succeeded on the merged branch."
-            elif [ "${BUILD_RESULT}" = "fail" ]; then
+              echo "To resolve:"
               echo ""
-              echo "❌ **FAIL** — the merged branch does not compile. Recent build output:"
-              echo ""
-              echo '```'
-              tail -40 /tmp/build.log 2>/dev/null || echo "(build log unavailable)"
-              echo '```'
+              echo "${FENCE}bash"
+              echo "git fetch origin && git checkout ${SYNC_BRANCH}"
+              echo "# edit the files above, remove every <<<<<<< ======= >>>>>>> marker"
+              echo "git add -A && git commit && git push origin ${SYNC_BRANCH}"
+              echo "${FENCE}"
             else
+              echo "\`${TAG}\` merged cleanly (merge commit, no rebase)."
+            fi
+            if [ -s /tmp/upstream-workflow-changes.txt ]; then
               echo ""
-              echo "ℹ️ Not run."
+              echo "### Workflow files not absorbed"
+              echo ""
+              echo "A GITHUB_TOKEN push cannot change \`.github/workflows\`, and these files are upstream release machinery. \`dev\`'s version is kept. Upstream changed:"
+              echo ""
+              awk '{printf "- \140%s\140\n", $0}' /tmp/upstream-workflow-changes.txt
             fi
             echo ""
-            echo "### Merge status"
-            if [ "${CONFLICTS}" = "true" ]; then
+            echo "### Compatibility build"
+            echo ""
+            if [ "${BUILD_RESULT}" = "pass" ]; then
+              echo "Pass: \`go build ./core/... ./framework/... ./transports/...\` (with UI stub) succeeded on the merged branch."
+            elif [ "${BUILD_RESULT}" = "fail" ]; then
+              echo "**FAIL**: the merged branch does not compile. Recent build output:"
               echo ""
-              echo "⚠️ **Manual conflict resolution required.** This branch is \`dev\` WITHOUT the upstream merge (the merge was aborted, not force-resolved). To complete the sync:"
-              echo ""
-              echo '```bash'
-              echo "git fetch origin && git checkout ${SYNC_BRANCH}"
-              echo "git remote add upstream https://github.com/maximhq/bifrost.git 2>/dev/null || true"
-              echo "git fetch upstream --tags"
-              echo "git merge ${TAG}   # resolve conflicts, then commit and push"
-              echo '```'
-              echo ""
-              echo "This PR will show the conflicts against \`dev\` once the merge is pushed."
+              echo "${FENCE}"
+              tail -40 /tmp/build.log 2>/dev/null || echo "(build log unavailable)"
+              echo "${FENCE}"
             else
-              echo ""
-              echo "✅ \`${TAG}\` merged cleanly into this branch (merge commit, no rebase)."
+              echo "Not run (conflicts or an existing branch)."
             fi
+            echo ""
+            echo "### Checks"
+            echo ""
+            echo "PRs opened with the default GITHUB_TOKEN do not trigger workflows. If no checks appear, run \`fork-pr-tests\` by hand on \`${SYNC_BRANCH}\` (\`gh workflow run fork-pr-tests.yml --ref ${SYNC_BRANCH}\`) or close and reopen the PR."
             echo ""
             echo "### Safety"
             echo ""
-            echo "- 🤖 Opened by the [fork-upstream-sync](https://github.com/meetneptune/bifrost/actions/workflows/fork-upstream-sync.yml) workflow."
-            echo "- 🚫 **No auto-merge, no auto-deploy, no auto-close** — a human must review and merge this PR."
-            echo "- 🚫 This workflow never pushes to \`dev\` directly; only the \`${SYNC_BRANCH}\` branch is workflow-owned."
-            echo ""
-            echo "_Review the upstream changes, run CI, then merge manually when ready._"
+            echo "- Opened by the [fork-upstream-sync](https://github.com/${GITHUB_REPOSITORY}/actions/workflows/fork-upstream-sync.yml) workflow."
+            echo "- No auto-merge, no auto-deploy, no auto-close. A human must review and merge this PR."
+            echo "- This workflow never pushes to \`dev\`; only the \`${SYNC_BRANCH}\` branch is workflow-owned."
           } > /tmp/pr-body.md
+
+          cat /tmp/pr-body.md >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "Dry run: nothing pushed, no PR opened."
+            exit 0
+          fi
+
+          DRAFT=""
+          if [ "${CONFLICTS}" = "true" ] || [ "${BUILD_RESULT}" = "fail" ]; then DRAFT="--draft"; fi
 
           EXISTING_PR="$(gh pr list --base dev --head "${SYNC_BRANCH}" --state open --json number --jq '.[0].number // empty')"
           if [ -n "${EXISTING_PR}" ]; then
-            echo "PR #${EXISTING_PR} already exists for ${SYNC_BRANCH} — updating title/body and commenting."
-            gh pr edit "${EXISTING_PR}" --title "${TITLE}" --body-file /tmp/pr-body.md
-            gh pr comment "${EXISTING_PR}" --body "🔄 Sync branch rebuilt from latest \`origin/dev\` against upstream \`${TAG}\` ($(date -u '+%Y-%m-%d %H:%M UTC')). Conflicts: \`${CONFLICTS}\`. Build: \`${BUILD_RESULT:-skipped}\`."
+            if [ "${EXISTING}" = "true" ]; then
+              echo "PR #${EXISTING_PR} already exists for ${SYNC_BRANCH}; branch has its own commits, leaving title and body as they are."
+            else
+              echo "PR #${EXISTING_PR} already exists for ${SYNC_BRANCH}; updating the body."
+              gh pr edit "${EXISTING_PR}" --title "${TITLE}" --body-file /tmp/pr-body.md
+            fi
+          elif ! OUT="$(gh pr create --base dev --head "${SYNC_BRANCH}" --title "${TITLE}" --body-file /tmp/pr-body.md ${DRAFT} 2>&1)"; then
+            echo "${OUT}"
+            {
+              echo ""
+              echo "### Sync PR was NOT opened"
+              echo ""
+              echo "Branch \`${SYNC_BRANCH}\` is pushed. Open the PR here: ${COMPARE}"
+              echo ""
+              echo "Cause: \`${OUT}\`"
+              echo "Fix once: enable Settings > Actions > General > \"Allow GitHub Actions to create and approve pull requests\", or add the secret \`SYNC_PR_TOKEN\`."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "::error title=Sync PR not opened::${SYNC_BRANCH} is pushed for ${TAG}; open the PR at ${COMPARE}. Enable 'Allow GitHub Actions to create and approve pull requests' or set SYNC_PR_TOKEN."
+            exit 1
           else
-            gh pr create --base dev --head "${SYNC_BRANCH}" --title "${TITLE}" --body-file /tmp/pr-body.md
+            echo "${OUT}"
           fi

@@ -14,6 +14,8 @@ permissions:
 
 jobs:
   check-egress-allowlist:
+    # Fork: scoped to the fork-owned workflows. Upstream's release-pipeline.yml and
+    # run-core-tests.yml never run here and fail this lint on pristine v2.3.0.
     name: Egress allowlist covers apt + provider-harness hosts
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -45,7 +47,7 @@ jobs:
             --require-hashes -r .github/workflows/requirements/pyyaml.txt
 
       - name: Check egress allowlists
-        run: ./.github/workflows/scripts/check-egress-allowlist.sh
+        run: ./.github/workflows/scripts/check-egress-allowlist.sh .github/workflows/fork-*.yml
 
       - name: Check version-format guard
         run: ./.github/workflows/scripts/version-format.test.sh

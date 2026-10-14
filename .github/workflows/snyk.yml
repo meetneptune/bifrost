@@ -11,6 +11,8 @@ permissions:
 
 jobs:
   snyk-open-source:
+    # Fork: needs upstream's Snyk org token; failed on every dev push and the workflow is disabled in the repo settings.
+    if: github.repository == 'maximhq/bifrost'
     name: Snyk Open Source (deps)
     runs-on: ubuntu-latest
     steps:
@@ -84,6 +86,8 @@ jobs:
           sarif_file: snyk.sarif
 
   snyk-code:
+    # Fork: needs upstream's Snyk org token; failed on every dev push and the workflow is disabled in the repo settings.
+    if: github.repository == 'maximhq/bifrost'
     name: Snyk Code (SAST)
     runs-on: ubuntu-latest
     steps:

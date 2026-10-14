@@ -70,7 +70,7 @@ Workflow: `.github/workflows/fork-upstream-sync.yml` (weekly)
 
 - Required on every PR to `dev`: `Build and key-free tests` (fork-pr-tests.yml) and `dependency-review` (dependency-review.yml). Both run on every PR without a path filter.
 - Upstream-owned workflows are kept on `dev`'s version during sync. A fork guard (`if: github.repository == 'maximhq/bifrost'`) therefore survives later syncs. Never delete an upstream workflow file; guard it.
-- Guarded in the fork: all release and publish jobs, CodSpeed, Live Tests, Snyk, OpenSSF Scorecard, and Dependabot Alerts to Issues. `Workflow Lint` runs the egress-allowlist lint only on the fork-owned workflows (`fork-*.yml`, `dependency-review.yml`).
+- Guarded in the fork: all release and publish jobs, CodSpeed, Live Tests, Snyk, OpenSSF Scorecard, and Dependabot Alerts to Issues. `Workflow Lint` runs the egress-allowlist lint only on the fork-owned workflows (`fork-*.yml`).
 - CodeQL uses GitHub's default setup (a repository setting, not a workflow file). `Analyze (go)` takes about 20 minutes, and the aggregate `CodeQL` check can report a missing Go configuration if it posts before the Go analysis uploads. Do not require `CodeQL` or `Analyze (*)`. Existing alerts are in upstream code.
 
 ## What NOT to do

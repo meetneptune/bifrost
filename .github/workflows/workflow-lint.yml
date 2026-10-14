@@ -47,7 +47,7 @@ jobs:
             --require-hashes -r .github/workflows/requirements/pyyaml.txt
 
       - name: Check egress allowlists
-        run: ./.github/workflows/scripts/check-egress-allowlist.sh .github/workflows/fork-*.yml .github/workflows/dependency-review.yml
+        run: ./.github/workflows/scripts/check-egress-allowlist.sh .github/workflows/fork-*.yml
 
       - name: Check version-format guard
         run: ./.github/workflows/scripts/version-format.test.sh

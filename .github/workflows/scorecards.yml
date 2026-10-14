@@ -19,7 +19,9 @@ permissions: read-all
 
 jobs:
   analysis:
-    # Fork: the scorecard-action image pull from gcr.io is denied (billing disabled on its project), and publishing results to OpenSSF is an upstream concern.
+    # Fork: scorecard-action refuses to run off the default branch and publishes results to OpenSSF, which is upstream's
+    # concern. The failures seen on dev came from the old v2.4.0 pin (gcr.io image, billing disabled); the pinned v2.4.4
+    # pulls from ghcr.io fine. Not yet proven green on dev: remove this guard and dispatch it there to try.
     if: github.repository == 'maximhq/bifrost'
     name: Scorecard analysis
     runs-on: ubuntu-latest

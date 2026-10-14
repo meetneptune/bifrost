@@ -19,7 +19,7 @@ permissions:
 jobs:
   live-fake:
     name: GPT Live (fake upstream)
-    if: github.event_name != 'schedule'
+    if: github.repository == 'maximhq/bifrost' && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -63,6 +63,7 @@ jobs:
 
   live-long:
     name: GPT Live (long sessions, fake upstream)
+    if: github.repository == 'maximhq/bifrost'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:

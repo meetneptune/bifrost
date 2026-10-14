@@ -38,6 +38,7 @@ jobs:
     # https://codspeed.io/docs/benchmarks/go
     # The org's Default runner group must "Allow public repositories", or the
     # jobs queue without ever starting.
+    if: github.repository == 'maximhq/bifrost'
     runs-on: codspeed-macro
     timeout-minutes: 45
 

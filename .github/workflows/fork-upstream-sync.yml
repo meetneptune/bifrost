@@ -237,6 +237,7 @@ jobs:
         run: |
           # shellcheck disable=SC2016  # backticks in echo are literal Markdown
           set -euo pipefail
+          FENCE="$(printf '\140\140\140')"
           TITLE="chore: sync upstream ${TAG} into dev"
           COMPARE="https://github.com/${GITHUB_REPOSITORY}/compare/dev...${SYNC_BRANCH}?expand=1"
 
@@ -260,15 +261,15 @@ jobs:
             elif [ "${CONFLICTS}" = "true" ]; then
               echo "**Merge conflicts: resolve before merging.** This draft PR holds the merge with the markers committed. Conflicting files:"
               echo ""
-              sed 's/^/- `/; s/$/`/' /tmp/conflicts.txt
+              awk '{printf "- \140%s\140\n", $0}' /tmp/conflicts.txt
               echo ""
               echo "To resolve:"
               echo ""
-              echo '```bash'
+              echo "${FENCE}bash"
               echo "git fetch origin && git checkout ${SYNC_BRANCH}"
               echo "# edit the files above, remove every <<<<<<< ======= >>>>>>> marker"
               echo "git add -A && git commit && git push origin ${SYNC_BRANCH}"
-              echo '```'
+              echo "${FENCE}"
             else
               echo "\`${TAG}\` merged cleanly (merge commit, no rebase)."
             fi
@@ -278,7 +279,7 @@ jobs:
               echo ""
               echo "A GITHUB_TOKEN push cannot change \`.github/workflows\`, and these files are upstream release machinery. \`dev\`'s version is kept. Upstream changed:"
               echo ""
-              sed 's/^/- `/; s/$/`/' /tmp/upstream-workflow-changes.txt
+              awk '{printf "- \140%s\140\n", $0}' /tmp/upstream-workflow-changes.txt
             fi
             echo ""
             echo "### Compatibility build"
@@ -288,9 +289,9 @@ jobs:
             elif [ "${BUILD_RESULT}" = "fail" ]; then
               echo "**FAIL**: the merged branch does not compile. Recent build output:"
               echo ""
-              echo '```'
+              echo "${FENCE}"
               tail -40 /tmp/build.log 2>/dev/null || echo "(build log unavailable)"
-              echo '```'
+              echo "${FENCE}"
             else
               echo "Not run (conflicts or an existing branch)."
             fi

@@ -47,8 +47,6 @@ jobs:
     if: github.repository == 'meetneptune/bifrost'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      GH_TOKEN: ${{ secrets.SYNC_PR_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@fe104658747b27e96e4f7e80cd0a94068e53901d # v2.16.1
@@ -61,7 +59,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-          token: ${{ secrets.SYNC_PR_TOKEN || secrets.GITHUB_TOKEN }}
+          # No credential stays in .git/config: the compatibility build compiles
+          # upstream code. The push and PR steps receive the token explicitly.
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
@@ -82,7 +82,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${INPUT_TAG}" ]; then
-            # Manual dispatch: validate the pinned tag exists upstream.
+            # Manual dispatch: same stable-release pattern as the scheduled path.
+            if ! printf '%s\n' "${INPUT_TAG}" | grep -Eq '^transports/v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Pinned tag '${INPUT_TAG}' must match transports/vX.Y.Z (no pre-release suffix)" >&2
+              exit 1
+            fi
             if ! git rev-parse -q --verify "refs/tags/${INPUT_TAG}" >/dev/null; then
               echo "::error::Pinned tag '${INPUT_TAG}' does not exist. Fetched upstream tags include:" >&2
               git tag -l 'transports/v*' | sort -V | tail -10 >&2
@@ -113,14 +117,24 @@ jobs:
         # tag is already an ancestor of dev — nothing left to absorb.
         env:
           TAG: ${{ steps.target.outputs.tag }}
+          SYNC_BRANCH: ${{ steps.target.outputs.sync_branch }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if git merge-base --is-ancestor "${TAG}" origin/dev; then
             echo "${TAG} is already contained in origin/dev — nothing to sync."
             echo "skip=true" >> "${GITHUB_ENV}"
-          else
-            echo "skip=false" >> "${GITHUB_ENV}"
+            exit 0
           fi
+          # A sync PR closed without merging is a human decision: do not
+          # recreate it every week. Reopen it or delete the branch to retry.
+          CLOSED="$(gh pr list --base dev --head "${SYNC_BRANCH}" --state closed --json number,mergedAt --jq '[.[] | select(.mergedAt == null)][0].number // empty')"
+          if [ -n "${CLOSED}" ]; then
+            echo "::notice::Sync PR #${CLOSED} for ${TAG} was closed without merging; skipping. Reopen it or pin a newer tag to sync again."
+            echo "skip=true" >> "${GITHUB_ENV}"
+            exit 0
+          fi
+          echo "skip=false" >> "${GITHUB_ENV}"
 
       - name: Create sync branch and merge upstream tag
         if: env.skip == 'false'
@@ -190,12 +204,16 @@ jobs:
         if: env.skip == 'false' && steps.merge.outputs.existing == 'false' && inputs.dry_run != true
         env:
           SYNC_BRANCH: ${{ steps.target.outputs.sync_branch }}
+          PUSH_TOKEN: ${{ secrets.SYNC_PR_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          AUTH="$(printf 'x-access-token:%s' "${PUSH_TOKEN}" | base64 | tr -d '\n')"
+          echo "::add-mask::${AUTH}"
           # Only the workflow-owned upstream-sync/* branch is pushed; never dev.
           # The merge step left any existing branch with work untouched, so the
           # lease only guards a branch that is empty relative to dev.
-          git push --force-with-lease origin "${SYNC_BRANCH}"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH}" \
+            push --force-with-lease origin "${SYNC_BRANCH}"
 
       - name: Compatibility build check
         if: env.skip == 'false' && steps.merge.outputs.conflicts == 'false'
@@ -234,6 +252,7 @@ jobs:
           UPSTREAM_COMMITS: ${{ steps.merge.outputs.upstream_commits }}
           INPUT_TAG: ${{ inputs.tag }}
           DRY_RUN: ${{ inputs.dry_run }}
+          GH_TOKEN: ${{ secrets.SYNC_PR_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           # shellcheck disable=SC2016  # backticks in echo are literal Markdown
           set -euo pipefail
@@ -318,8 +337,12 @@ jobs:
 
           EXISTING_PR="$(gh pr list --base dev --head "${SYNC_BRANCH}" --state open --json number --jq '.[0].number // empty')"
           if [ -n "${EXISTING_PR}" ]; then
-            echo "PR #${EXISTING_PR} already exists for ${SYNC_BRANCH}; updating the body."
-            gh pr edit "${EXISTING_PR}" --title "${TITLE}" --body-file /tmp/pr-body.md
+            if [ "${EXISTING}" = "true" ]; then
+              echo "PR #${EXISTING_PR} already exists for ${SYNC_BRANCH}; branch has its own commits, leaving title and body as they are."
+            else
+              echo "PR #${EXISTING_PR} already exists for ${SYNC_BRANCH}; updating the body."
+              gh pr edit "${EXISTING_PR}" --title "${TITLE}" --body-file /tmp/pr-body.md
+            fi
           elif ! OUT="$(gh pr create --base dev --head "${SYNC_BRANCH}" --title "${TITLE}" --body-file /tmp/pr-body.md ${DRAFT} 2>&1)"; then
             echo "${OUT}"
             {

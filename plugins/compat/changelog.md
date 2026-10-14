@@ -1,2 +1,7 @@
-- fix: removed the namespace-tool flattening that ran under `should_convert_params`; it spliced nested functions into the top-level list without a namespace prefix, so two namespaces sharing a function name produced duplicate tool names and an upstream 400. Flattening now lives in Bifrost core for every provider whose wire lacks the `namespace` type, with unique `<namespace>__<function>` names and response-side mapping back. `should_convert_params` is still accepted so existing configs load, but it no longer changes any request (#7048)
-- chore: upgraded core to v1.9.0 and framework to v1.7.0
+- feat: add convert_decision_to_responses setting (default off) and x-bf-compat feature; skip decision emulation for models served natively by openai, perplexity, ollama, openrouter and cloudflare
+- feat: add force_reasoning_only_models_to_responses toggle (default true)
+- feat: report reasoning.mode as dropped on providers without it
+- feat: implement HTTPTransportResponseHeadersHook as a no-op
+- fix: hand output token and thinking budget fitting to core through BifrostContextKeyConvertParamValues so it runs per attempt
+- fix: drop reasoning.summary for models that do not support it
+- chore: upgraded core to v1.12.0 and framework to v1.9.0

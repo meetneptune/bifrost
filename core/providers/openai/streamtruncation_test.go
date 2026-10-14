@@ -152,6 +152,115 @@ func chatChunk(content string, finishReason *string) string {
 		`"choices":[{"index":0,"delta":` + delta + `,"finish_reason":` + finish + `}]}` + "\n\n"
 }
 
+func TestChatStreamContentLengthTruncationAfterFinishReason(t *testing.T) {
+	for _, extraBytes := range []int{0, 100} {
+		t.Run(fmt.Sprintf("missing_%d_bytes", extraBytes), func(t *testing.T) {
+			body := chatChunk("hello", nil) + chatChunk("", schemas.Ptr("stop"))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Content-Length", fmt.Sprint(len(body)+extraBytes))
+				if _, err := io.WriteString(w, body); err != nil {
+					t.Errorf("write body: %v", err)
+				}
+				w.(http.Flusher).Flush()
+				if extraBytes > 0 {
+					panic(http.ErrAbortHandler)
+				}
+			}))
+			defer server.Close()
+
+			provider := newStreamTestProvider(server.URL)
+			stream, bifrostErr := provider.ChatCompletionStream(newStreamTestContext(), passthroughPostHook, nil, testKey(), basicChatRequest())
+			if bifrostErr != nil {
+				t.Fatalf("stream setup failed: %v", bifrostErr)
+			}
+			chunks := collectChunks(t, stream)
+			sawContent, sawError := false, false
+			for _, chunk := range chunks {
+				if chunk.BifrostError != nil {
+					sawError = true
+					if extraBytes == 0 || chunk.BifrostError.Error == nil || !strings.Contains(chunk.BifrostError.Error.Message, io.ErrUnexpectedEOF.Error()) {
+						t.Errorf("unexpected stream error: %+v", chunk.BifrostError)
+					}
+				}
+				if chunk.BifrostChatResponse != nil {
+					for _, choice := range chunk.BifrostChatResponse.Choices {
+						if choice.ChatStreamResponseChoice != nil && choice.Delta != nil && choice.Delta.Content != nil && *choice.Delta.Content == "hello" {
+							sawContent = true
+						}
+					}
+				}
+			}
+			if !sawContent {
+				t.Error("content received before the EOF was not forwarded")
+			}
+			if sawError != (extraBytes > 0) {
+				t.Errorf("stream error present = %v with %d missing bytes: finish_reason cannot prove HTTP body completeness", sawError, extraBytes)
+			}
+		})
+	}
+}
+
+// ModelScope-style OpenAI-compatible upstreams put a full `message` object next
+// to `delta` in every streaming chunk. BifrostResponseChoice embeds both the
+// stream and non-stream choice shapes, so a plain unmarshal allocated
+// ChatNonStreamResponseChoice from that key and Bifrost re-emitted the message
+// object - with its empty reasoning noise - on every SSE event, violating the
+// choice struct's own "only one non-nil at a time" invariant and making
+// reasoning-aware clients insert a thinking block per chunk. Streaming chunks
+// must carry only delta. See https://github.com/maximhq/bifrost/issues/7294 and
+// https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events
+// (chat.completion.chunk choices carry `delta`, not `message`).
+func TestChatStreamDropsUpstreamMessageObject(t *testing.T) {
+	modelScopeChunk := func(deltaJSON string, finish string) string {
+		return `data: {"id":"chatcmpl-ms","object":"chat.completion.chunk","created":1,"model":"repro-model",` +
+			`"choices":[{"index":0,` +
+			`"message":{"role":"assistant","content":"","reasoning":"","reasoning_content":"","reasoning_details":[{"index":0,"type":"reasoning.text","text":""}]},` +
+			`"delta":` + deltaJSON + `,"finish_reason":` + finish + `}]}` + "\n\n"
+	}
+	body := modelScopeChunk(`{"role":"assistant","content":"","reasoning_content":"We"}`, "null") +
+		modelScopeChunk(`{"content":"Hello","reasoning_content":""}`, "null") +
+		modelScopeChunk(`{"content":"","reasoning_content":""}`, `"stop"`) +
+		"data: [DONE]\n\n"
+
+	server := completeSSEServer(t, body)
+	defer server.Close()
+
+	provider := newStreamTestProvider(server.URL)
+	stream, bifrostErr := provider.ChatCompletionStream(newStreamTestContext(), passthroughPostHook, nil, testKey(), basicChatRequest())
+	if bifrostErr != nil {
+		t.Fatalf("stream setup failed: %v", bifrostErr)
+	}
+
+	chunks := collectChunks(t, stream)
+	if len(chunks) == 0 {
+		t.Fatal("expected forwarded chunks")
+	}
+	sawContent := false
+	for i, chunk := range chunks {
+		if chunk.BifrostError != nil {
+			t.Fatalf("chunk %d unexpectedly carried an error: %+v", i, chunk.BifrostError)
+		}
+		if chunk.BifrostChatResponse == nil {
+			continue
+		}
+		for _, choice := range chunk.BifrostChatResponse.Choices {
+			if choice.ChatNonStreamResponseChoice != nil {
+				t.Errorf("chunk %d leaked the upstream message object into a streaming choice: %+v", i, choice.ChatNonStreamResponseChoice)
+			}
+			if choice.ChatStreamResponseChoice != nil && choice.ChatStreamResponseChoice.Delta != nil {
+				delta := choice.ChatStreamResponseChoice.Delta
+				if delta.Content != nil && *delta.Content == "Hello" {
+					sawContent = true
+				}
+			}
+		}
+	}
+	if !sawContent {
+		t.Error("the content delta itself must still be forwarded")
+	}
+}
+
 // Pre-first-byte death: nothing has reached the client yet, so the error must be
 // the very first chunk. That is what lets CheckFirstStreamChunkForError convert it
 // into a synchronous error and give the transport a real non-2xx status.
@@ -771,6 +880,70 @@ func TestTextCompletionStreamOptInWithWaitForUsageKeepsTrailingUsage(t *testing.
 	}
 	if final.BifrostTextCompletionResponse.Usage.TotalTokens != 1100 {
 		t.Errorf("expected total_tokens 1100 from the chunk after finish_reason, got %d", final.BifrostTextCompletionResponse.Usage.TotalTokens)
+	}
+}
+
+// The synthesized final text chunk names the model the upstream served, like the
+// chat path, not the requested id.
+func TestTextCompletionStreamFinalChunkCarriesServedModel(t *testing.T) {
+	server := heartbeatSSEServer(t, `data: {"id":"cmpl-repro","object":"text_completion","created":1,"model":"served-model","choices":[{"index":0,"text":"hello","finish_reason":null}]}`+"\n\n"+
+		`data: {"id":"cmpl-repro","object":"text_completion","created":1,"model":"served-model","choices":[{"index":0,"text":"","finish_reason":"stop"}]}`+"\n\n"+
+		`data: {"id":"cmpl-repro","object":"text_completion","created":1,"model":"served-model","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`+"\n\n"+
+		"data: [DONE]\n\n")
+	defer server.Close()
+
+	provider := newStreamTestProvider(server.URL)
+	request := &schemas.BifrostTextCompletionRequest{
+		Provider: schemas.OpenAI,
+		Model:    "requested-model",
+		Input:    &schemas.TextCompletionInput{PromptStr: schemas.Ptr("hi")},
+	}
+	stream, bifrostErr := provider.TextCompletionStream(newStreamTestContext(), passthroughPostHook, nil, testKey(), request)
+	if bifrostErr != nil {
+		t.Fatalf("stream setup failed: %v", bifrostErr)
+	}
+
+	chunks := collectChunks(t, stream)
+	if len(chunks) == 0 {
+		t.Fatal("expected chunks from a completed stream")
+	}
+	final := chunks[len(chunks)-1]
+	if final.BifrostTextCompletionResponse == nil || final.BifrostTextCompletionResponse.Usage == nil {
+		t.Fatalf("expected the final text completion chunk to carry usage, got %+v", final)
+	}
+	if got := final.BifrostTextCompletionResponse.Model; got != "served-model" {
+		t.Errorf("final chunk model = %q, want the upstream's %q", got, "served-model")
+	}
+}
+
+// The text-completion stream falls back to the requested id when the upstream never names a model.
+func TestTextCompletionStreamFinalChunkFallsBackToRequestedModel(t *testing.T) {
+	server := heartbeatSSEServer(t, `data: {"id":"cmpl-repro","object":"text_completion","created":1,"choices":[{"index":0,"text":"hello","finish_reason":"stop"}]}`+"\n\n"+
+		`data: {"id":"cmpl-repro","object":"text_completion","created":1,"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`+"\n\n"+
+		"data: [DONE]\n\n")
+	defer server.Close()
+
+	provider := newStreamTestProvider(server.URL)
+	request := &schemas.BifrostTextCompletionRequest{
+		Provider: schemas.OpenAI,
+		Model:    "requested-model",
+		Input:    &schemas.TextCompletionInput{PromptStr: schemas.Ptr("hi")},
+	}
+	stream, bifrostErr := provider.TextCompletionStream(newStreamTestContext(), passthroughPostHook, nil, testKey(), request)
+	if bifrostErr != nil {
+		t.Fatalf("stream setup failed: %v", bifrostErr)
+	}
+
+	chunks := collectChunks(t, stream)
+	if len(chunks) == 0 {
+		t.Fatal("expected chunks from a completed stream")
+	}
+	final := chunks[len(chunks)-1]
+	if final.BifrostTextCompletionResponse == nil {
+		t.Fatalf("expected a final text completion chunk, got %+v", final)
+	}
+	if got := final.BifrostTextCompletionResponse.Model; got != "requested-model" {
+		t.Errorf("final chunk model = %q, want the requested %q", got, "requested-model")
 	}
 }
 

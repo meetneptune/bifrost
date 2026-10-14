@@ -1,14 +1,87 @@
-- fix: Responses API requests emit `gen_ai.response.finish_reason` / `gen_ai.response.finish_reasons` on the OTEL `llm.call` span. `PopulateResponsesResponseAttributes` never copied the top-level `stop_reason` into the span attributes, so refusals on `/v1/responses` were invisible to OTEL consumers even though the stop reason reached the Logs DB; it now emits `finish_reasons` like the chat path and the tracer derives the singular key from it (#7204)
-- feat: model allow and block lists accept `regex:` entries. The provider-key aggregate keeps an exact name next to a pattern that also covers it, the catalog allow check tries a pattern against the bare name and `provider/model`, and listings skip pattern entries
-- fix: ClickHouse log store deletes no longer run as heavyweight `ALTER TABLE ... DELETE` mutations. The retention cleaner issued one such mutation per 100 rows, each rewriting the whole current-month part, and the once-a-minute stale-`processing` sweeps issued one per table unconditionally, filling replica disks in minutes. Every delete on the ClickHouse store (retention sweep, `Flush`/`FlushMCPToolLogs`, UI log deletes, async job and webhook delivery expiry) is now a single lightweight `DELETE FROM ... WHERE` per run, skipped entirely when nothing matches. The table TTL derived from `logs_store.retention_days` is now reconciled on every startup with `MODIFY TTL` (metadata only), so changing the value reaches existing tables; `0` leaves an existing TTL untouched (#7098)
-- feat: access profiles and governance projects reference Virtual MCPs through `virtual_mcp_name`, so config files are portable across environments instead of carrying database-assigned integer IDs. Names resolve to stored records on startup and a name that matches nothing is refused; `virtual_mcp_id` is deprecated, still accepted, and wins when both are set. `mcp_configs` (`{ mcp_client_id, tools_to_execute }`) replaces the `mcp_servers` and `mcp_tool_overrides` include-exclude model with a single allowlist, where `["*"]` grants all tools including future ones, `[]` grants none, and a named list grants only those; the old keys are deprecated, still accepted, and folded into the new shape at load time (#7181)
-- feat: `MCPToolLog` records governance entity names beside their IDs, so MCP tool logs carry the same attribution shape the `logs` table has instead of rendering raw UUIDs in the dashboard. `user_name`, `team_name`, `customer_name` and `business_unit_name` stop being `gorm:"-"` transients and become storage; the multi-valued `team_ids`/`team_names`, `customer_ids`/`customer_names` and `business_unit_ids`/`business_unit_names` sets are stored as index-aligned JSON arrays; and `budget_ids` and `rate_limit_ids` are recorded id-only, as in `logs`. Names are written from the request context at ingestion through the new `MCPToolLog.ApplyGovernance` in `framework/logstore/governance.go`, with nothing resolved on read. Added by migration `mcp_tool_logs_add_governance_snapshots` (#7154)
-- feat: endpoint-attributed MCP observations are carried in the standard logging pipeline, so inspected MCP tool calls are logged with bounded identity (device, app key, server label, tool name, decision) sourced from the gateway rather than from payload-supplied headers. `SetMCPObservation` attaches the attribution to a `BifrostContext` and `applyMCPObservation` writes it onto the `MCPToolLog` from both `PreMCPHook` and `PostMCPHook`, snapshotting the observation so it cannot alias across async log entries (#6959)
-- feat: the `error_type` classification vocabulary is threaded through the framework so `bifrost_error_requests_total` can carry a normalized fault-domain label alongside `status_code` (#7141)
-- feat: model pricing supports time-of-day peak and off-peak rates. `TableModelPricing` gains `off_peak_cost_multiplier` (a nullable float) and `peak_hours` (a JSON-serialized `PeakHoursSchedule` of recurring weekly windows using IANA timezone names, weekday numbers and half-open `HH:MM` intervals that may wrap past midnight), added by migration `add_time_of_day_pricing_columns` and aliased into the datasheet package so the JSON shape stays self-contained. The cost engine evaluates the schedule against the request start time and scales usage-based charges by the multiplier when the request falls outside every peak window, applied once in `computeCostFromInput` so every modality is covered; flat `CostPerRequest` and `SearchQueriesCost` fees are excluded, as is `AdditionalCost`, which is discounted independently through its own pricing rows. Both fields are exposed on `PricingPatch` in the OpenAPI and governance schemas, with `off_peak_cost_multiplier` bounded to `(0, 1]` (#6574, #6575, #6576)
-- feat: `SecretVar.RedactedIfSecret()` is used for non-credential fields in `ProviderConfig.Redacted()`, `Config.GetAllKeys()` and `Config.RedactMCPClientConfig()`, so regions, endpoints, service URLs and MCP connection strings surface as plaintext while anything env-var or vault-backed stays masked (#7085)
-- feat: GA realtime transcription sessions are routed, governed, logged and priced through the normal framework pipeline, resolving the routing model from the nested `audio.input.transcription.model` that arrives in `session.update` rather than from the connect URL (#7089)
-- feat: a `use_openai_endpoints` column on the provider keys table, added by migration `add_use_openai_endpoints_column`, opts a Bedrock key or alias into Bedrock's OpenAI-compatible endpoints instead of Converse (#7073)
-- feat: the reserved tool-namespace list a provider keeps for its own server tools is read from the datasheet row `reserved_tool_namespaces`, so a namespace collision check no longer requires a code change (#7084)
-- fix: `exchangeRefreshToken` includes `client_secret` only when the secret is non-empty, matching `exchangeCodeForTokensWithPKCE`. Public OAuth2 clients registered against servers that support only `token_endpoint_auth_method: none` have no secret, and unconditionally setting `client_secret=` sent an empty `client_secret_post` attempt that strict authorization servers answered with `invalid_client`, flipping the token row to `needs_reauth` even though the refresh token was valid (#7042)
-- fix: the virtual key `allowed_models: ["*"]` handling for governance added in #6767 is reverted, returning the wildcard-with-empty-synced-catalog case to its previous behaviour (#7053)
+- feat: persist agent registrations, virtual-key agent grants, push configs and push delivery outbox, and store and query agent operation and event logs
+- feat: add Warp agent, read-only log/metric/governance tools, chat history and asker-scoped visibility
+- feat: index completed logs for Warp semantic search with sidekiq backfill and visibility prefiltering
+- feat: price live voice seconds and bind live sessions to the opening virtual key
+- feat: persist cloudflare_key_config.account_id on provider keys
+- feat: persist injected_tools on providers as a list of named entries
+- feat: persist, validate and expose oauth_key_config on provider keys
+- feat: add compat_convert_decision_to_responses column (default false, no backfill)
+- feat: add decision-specific token rates and skip negative variable-price rates for decisions
+- feat: complexity router decision classifier config with per-tier guidance criteria, shipped defaults and decision cost tracking
+- feat: add framework/queue with memory, SQLite, Postgres and ClickHouse backends
+- feat: add embedding_input log column and span attributes for the new embedding input shape
+- feat: replace search_context_cost_per_query with web_search_cost_per_request priced from tool_usage.web_search.num_requests
+- feat: price from the catalog when ignore_provider_cost is on, including streamed cost
+- feat: add compat_force_reasoning_only_models_to_responses column and backfill it to true
+- feat: persist vertex aws_workload_identity as encrypted json
+- feat: accumulate shell and apply_patch stream items
+- feat: carry server_side_model in model capabilities
+- feat: failure attributes on the root span and end-to-end ttft for streams
+- feat: provider_objects ownership table, enforce_vk_object_ownership client config column and id-suffix lookups for provider jobs and objects
+- feat: AllowsEveryModel on grants
+- feat: require_public_target column on MCP clients
+- feat: MCP OAuth private network allowlist with separate public-only and allowlisted transports
+- feat: RevokeOAuth2GrantsBySubject for virtual key rotation
+- feat: persist discovered MCP server instructions and per-client max_instructions_length
+- feat: ReregisterDynamicClient for evicted dynamic client registrations
+- feat: access profiles held by teams, business units and customers; business_unit_id owner on virtual keys
+- feat: global proxy_config in config.json; webhooks, skills and plugin downloads through the HTTP client factory
+- feat: delete_after_expire on virtual keys and ListExpiredVirtualKeysForDeletion
+- feat: disable_content_logging column on virtual keys
+- feat: ttft_timeout_ms on routing rule targets
+- feat: hide every load balancer metadata key from log filters; logs registry for downstream routing panels
+- feat: team_count on paginated customer lists
+- feat: persist code mode limits in client config
+- feat: support HTTPTransportResponseHeadersHook in plugin loading
+- feat: add group_sessions log filter collapsing sessions to their earliest root with session rollups
+- feat: add ListSidekiqJobs and per-kind progress summarizers
+- feat: add object_storage_exclude_request_types to keep chosen request types out of object storage
+- feat: render raw payloads only when a connector opts in, and export the raw request and provider error body for failed requests
+- feat: compute per-category request cost breakdown in the model catalog
+- feat: produce trace data and plugin spans only when a connector consumes them
+- feat: add above-100k-token pricing tier
+- fix: use updated log retention for subsequent cleanup passes (#8212) (thanks [@Constantine3](https://github.com/Constantine3)!)
+- fix: transcription cost uses the provider-reported usage.cost when present, as chat already does (#7819) (thanks [@hmdsefi](https://github.com/hmdsefi)!)
+- fix: complexity router keeps custom provider name case so its config lookup succeeds (thanks [@MohammadHijjawi97](https://github.com/MohammadHijjawi97)!)
+- fix: config-driven skill updates serve the new version instead of failing on an unset LatestVersion (#8246) (thanks [@ozenyunus35](https://github.com/ozenyunus35)!)
+- fix: hash and merge the complexity analyzer config as written in config.json
+- fix: prefer realtime catalog rates for realtime requests
+- fix: parse the reasoning summary capability from the datasheet
+- fix: one terminal stream event per request
+- fix: responses streaming keeps the latest provider stop reason
+- fix: structured tool call summaries for custom, local shell and code interpreter calls
+- fix: tighter MCP OAuth2 server validation and redirect URI allowlist
+- fix: enforce the private-network dial policy on every redirect hop for pricing, model-parameter, MCP library and OAuth2 fetches
+- fix: match legacy plaintext lookups only against plaintext rows
+- fix: redact x-bf-vk in trace request headers
+- fix: move config.json virtual key and provider config limits to model config tiers (migration move_config_json_vk_limits_to_model_configs)
+- fix: wrap duplicate routing rule priority in ErrAlreadyExists and print the scope ID
+- fix: widen OAuth2 state, scope and client_name columns to text
+- fix: wrap ErrNotFound for unknown MCP client update and delete
+- fix: team, customer and business unit filters match multi-value owners on ClickHouse and SQLite
+- fix: read paginated model configs through ScopedDB
+- fix: count ranking rows the caller cannot name under a synthetic Other row
+- fix: always set http.response.status_code on error spans
+- fix: export gen_ai.request.tools on chat spans
+- fix: guard LLM span population against concurrent trace release
+- fix: dimension mismatch checks on every vector store and cosine scoring on Weaviate
+- fix: make ClickHouse max_query_size configurable, default 16 MiB
+- fix: keep millisecond precision in ClickHouse time filters and keyset cursor
+- fix: truncate ClickHouse input histories to the last message in list queries (thanks [@ege-arhan](https://github.com/ege-arhan)!)
+- fix: sanitize Postgres log text and JSON columns so one row cannot fail a batch, storing NUL-only values as U+FFFD
+- fix: add LogStore.BatchUpdate to reconcile late responses onto existing rows
+- fix: add MaintenanceGate to detect a running logstore migration
+- fix: classify transient Postgres write errors
+- fix: Postgres scale fixes for large logs, users and virtual keys, with runtime session timeouts and provider-object id lists bound as one parameter
+- fix: run only pending migration steps on startup
+- fix: begin sqlite config store transactions with an immediate write lock
+- fix: keep error_details in the database when object storage is enabled
+- fix: include plugin_logs in the object storage payload
+- fix: sort missing cost and latency last
+- fix: leave the cost split empty for opaque provider totals
+- fix: fall back to the lowercase model name in pricing lookup
+- fix: fall back to DB pricing when the datasheet URL hangs
+- fix: fire the after-sync hook only on the node that ran the sync
+- fix: serialize client config writers so metadata is carried forward
+- fix: bound agent log filter dropdowns by the DAC dimension ceiling
+- chore: upgraded core to v1.12.0

@@ -19,6 +19,8 @@ permissions: read-all
 
 jobs:
   analysis:
+    # Fork: the scorecard-action image pull from gcr.io is denied (billing disabled on its project), and publishing results to OpenSSF is an upstream concern.
+    if: github.repository == 'maximhq/bifrost'
     name: Scorecard analysis
     runs-on: ubuntu-latest
     permissions:

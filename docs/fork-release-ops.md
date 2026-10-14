@@ -63,14 +63,14 @@ Workflow: `.github/workflows/fork-upstream-sync.yml` (weekly)
 - Files under `.github/workflows` keep `dev`'s version (a `GITHUB_TOKEN` push cannot change them, and the upstream release workflows are guarded off in the fork). The PR body lists the upstream changes to them.
 - An existing sync branch that already has commits beyond `dev` is never rebuilt or force-pushed.
 - `workflow_dispatch` accepts `tag` (pin a release) and `dry_run` (print the PR body in the run summary; push nothing).
-- PR creation needs the repo setting "Allow GitHub Actions to create and approve pull requests" or the secret `SYNC_PR_TOKEN` (fine-grained PAT, contents and pull-requests write). Without either, the job pushes the branch, prints the compare URL in the run summary, and fails with an error that names this fix. A PR from `GITHUB_TOKEN` does not trigger checks: run `gh workflow run fork-pr-tests.yml --ref upstream-sync/<tag>` or use the PAT.
+- PR creation needs the repo setting "Allow GitHub Actions to create and approve pull requests" or the secret `SYNC_PR_TOKEN` (fine-grained PAT, contents and pull-requests write). Without either, the job pushes the branch, prints the compare URL in the run summary, and fails with an error that names this fix. A PR opened with `GITHUB_TOKEN` starts no workflows, and `dependency-review` has no manual trigger, so such a PR stays blocked on required checks. Set `SYNC_PR_TOKEN` (preferred; PRs it opens trigger workflows), or close and reopen the PR to start the PR workflows.
 - Never auto-merges. If a sync PR is red, the fork stays on its current baseline until a human fixes it.
 
 ## CI checks
 
 - Required on every PR to `dev`: `Build and key-free tests` (fork-pr-tests.yml) and `dependency-review` (dependency-review.yml). Both run on every PR without a path filter.
 - Upstream-owned workflows are kept on `dev`'s version during sync. A fork guard (`if: github.repository == 'maximhq/bifrost'`) therefore survives later syncs. Never delete an upstream workflow file; guard it.
-- Guarded in the fork: all release and publish jobs, CodSpeed, Live Tests, Snyk, OpenSSF Scorecard, Dependabot Alerts to Issues, and the upstream egress-allowlist lint (`Workflow Lint`).
+- Guarded in the fork: all release and publish jobs, CodSpeed, Live Tests, Snyk, OpenSSF Scorecard, and Dependabot Alerts to Issues. `Workflow Lint` runs the egress-allowlist lint only on the fork-owned workflows (`fork-*.yml`, `dependency-review.yml`).
 - CodeQL uses GitHub's default setup (a repository setting, not a workflow file). `Analyze (go)` takes about 20 minutes, and the aggregate `CodeQL` check can report a missing Go configuration if it posts before the Go analysis uploads. Do not require `CodeQL` or `Analyze (*)`. Existing alerts are in upstream code.
 
 ## What NOT to do

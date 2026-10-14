@@ -317,7 +317,7 @@ jobs:
             echo ""
             echo "### Checks"
             echo ""
-            echo "PRs opened with the default GITHUB_TOKEN do not trigger workflows. If no checks appear, run \`fork-pr-tests\` by hand on \`${SYNC_BRANCH}\` (\`gh workflow run fork-pr-tests.yml --ref ${SYNC_BRANCH}\`) or close and reopen the PR."
+            echo "PRs opened with the default GITHUB_TOKEN start no workflows, and \`dependency-review\` has no manual trigger, so this PR stays blocked on required checks. Set the \`SYNC_PR_TOKEN\` secret (preferred; PRs it opens trigger workflows), or close and reopen the PR to start the PR workflows."
             echo ""
             echo "### Safety"
             echo ""
